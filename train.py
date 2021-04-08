@@ -2,146 +2,233 @@ import os
 import time
 import numpy as np
 import tensorflow as tf
+import glob
 
 #import config
 #import tfutil
-#import dataset
+import dataset
 import networks
+import loss
 #import misc
 
+from tensorflow.keras.optimizers import Adam
 
-def Train_steps(dataset):
-    # Get a single batch    
-    image_batch = dataset.get('X')#.numpy()
-    energy_batch = dataset.get('Y')#.numpy()
-    ecal_batch = dataset.get('ecal')#.numpy()
-    ang_batch = dataset.get('ang')#.numpy()
-    #add_loss_batch = np.expand_dims(loss_ftn(image_batch, xpower, daxis2), axis=-1)
- 
-    # Generate Fake events with same energy and angle as data batch
-    noise = tf.random.normal((batch_size_per_replica, latent_size-2), 0, 1)
-    generator_ip = tf.concat((tf.reshape(energy_batch, (-1,1)), tf.reshape(ang_batch, (-1, 1)), noise),axis=1)
-    generated_images = generator(generator_ip, training=False)
+from tensorflow.keras.utils import to_categorical, plot_model
 
-    # Train discriminator first on real batch 
-    fake_batch = BitFlip(np.ones(batch_size_per_replica).astype(np.float32))
-    fake_batch = [[el] for el in fake_batch]
-    labels = [fake_batch, energy_batch, ang_batch, ecal_batch]
 
-    with tf.GradientTape() as tape:
-        predictions = discriminator(image_batch, training=True)
-        real_batch_loss = compute_global_loss(labels, predictions, batch_size, loss_weights=loss_weights)
+#----------------------------------------------------------------------------
+# Just-in-time processing of training images before feeding them to the networks.
+
+def process_reals(x, lod, mirror_augment, drange_data, drange_net):
+    with tf.name_scope('ProcessReals'):
+        with tf.name_scope('DynamicRange'):
+            x = tf.cast(x, tf.float32)
+            x = misc.adjust_dynamic_range(x, drange_data, drange_net)
+        if mirror_augment:
+            with tf.name_scope('MirrorAugment'):
+                s = tf.shape(x)
+                mask = tf.random_uniform([s[0], 1, 1, 1], 0.0, 1.0)
+                mask = tf.tile(mask, [1, s[1], s[2], s[3]])
+                x = tf.where(mask < 0.5, x, tf.reverse(x, axis=[3]))
+        with tf.name_scope('FadeLOD'): # Smooth crossfade between consecutive levels-of-detail.
+            s = tf.shape(x)
+            y = tf.reshape(x, [-1, s[1], s[2]//2, 2, s[3]//2, 2])
+            y = tf.reduce_mean(y, axis=[3, 5], keepdims=True)
+            y = tf.tile(y, [1, 1, 1, 2, 1, 2])
+            y = tf.reshape(y, [-1, s[1], s[2], s[3]])
+            x = tfutil.lerp(x, y, lod - tf.floor(lod))
+        with tf.name_scope('UpscaleLOD'): # Upscale to match the expected input/output size of the networks.
+            s = tf.shape(x)
+            factor = tf.cast(2 ** tf.floor(lod), tf.int32)
+            x = tf.reshape(x, [-1, s[1], s[2], 1, s[3], 1])
+            x = tf.tile(x, [1, 1, 1, factor, 1, factor])
+            x = tf.reshape(x, [-1, s[1], s[2] * factor, s[3] * factor])
+        return x
+
+#----------------------------------------------------------------------------
+# Dataset Reading and Processing
+
+def parse_tfrecord_tf(record):
+    features = tf.parse_single_example(record, features={
+        'shape': tf.FixedLenFeature([3], tf.int64),
+        'data': tf.FixedLenFeature([], tf.string)})
+    #data = tf.io.decode_raw(features['data'], tf.uint8)
+    data = tf.decode_raw(features['data'], tf.uint8)
+    return tf.reshape(data, features['shape'])
+
+def parse_tfrecord_np(record):
+    ex = tf.train.Example()
+    ex.ParseFromString(record)
+    shape = ex.features.feature['shape'].int64_list.value
+    data = ex.features.feature['data'].bytes_list.value[0]
+    return np.fromstring(data, np.uint8).reshape(shape)
+
+def determine_shape(tfr_files, resolution = None):
+    tfr_shapes = []
+    for tfr_file in tfr_files:
+        tfr_opt = tf.python_io.TFRecordOptions(tf.python_io.TFRecordCompressionType.NONE)
+        for record in tf.python_io.tf_record_iterator(tfr_file, tfr_opt):
+            tfr_shapes.append(parse_tfrecord_np(record).shape)
+            break
+
+
+    # Determine shape and resolution.
+    max_shape = max(tfr_shapes, key=lambda shape: np.prod(shape))
+    resolution = resolution if resolution is not None else max_shape[1]
+    resolution_log2 = int(np.log2(resolution))
+    shape = [max_shape[0], resolution, resolution]
+    tfr_lods = [resolution_log2 - int(np.log2(shape[1])) for shape in tfr_shapes]
+    assert all(shape[0] == max_shape[0] for shape in tfr_shapes)
+    assert all(shape[1] == shape[2] for shape in tfr_shapes)
+    assert all(shape[1] == resolution // (2**lod) for shape, lod in zip(tfr_shapes, tfr_lods))
+    assert all(lod in tfr_lods for lod in range(resolution_log2 - 1))
+
+    return tfr_shapes, tfr_lods
+
+#creates a dataset for each lod (level of detail)
+#
+def get_dataset(tfr_files,      # Directory containing a collection of tfrecords files.
+    resolution      = None,     # Dataset resolution, None = autodetect.
+    label_file      = None,     # Relative path of the labels file, None = autodetect.
+    max_label_size  = 0,        # 0 = no labels, 'full' = full labels, <int> = N first label components.
+    repeat          = True,     # Repeat dataset indefinitely.
+    shuffle_mb      = 4096,     # Shuffle data within specified window (megabytes), 0 = disable shuffling.
+    prefetch_mb     = 2048,     # Amount of data to prefetch (megabytes), 0 = disable prefetching.
+    buffer_mb       = 256,      # Read buffer size (megabytes).
+    num_threads     = 2):       # Number of concurrent threads.
+
+    dtype           = 'uint8'
+    batch_size      = 120       # should be a batch size per each lod??
     
-    gradients = tape.gradient(real_batch_loss, discriminator.trainable_variables) # model.trainable_variables or  model.trainable_weights
-    
-    #------------Minimize------------
-    #aggregate_grads_outside_optimizer = (optimizer._HAS_AGGREGATE_GRAD and not isinstance(strategy.extended, parameter_server_strategy.))
-    #gradients = optimizer_discriminator._clip_gradients(gradients)
+    # I'm not doing anything with the labels I might need to change that
 
-    #--------------------------------
-    
-    optimizer_discriminator.apply_gradients(zip(gradients, discriminator.trainable_variables)) # model.trainable_variables or  model.trainable_weights
+    tfr_shapes, tfr_lods = determine_shape(tfr_files, resolution = resolution)
+    _tf_datasets=dict()
 
-    #Train discriminato on the fake batch
-    fake_batch = BitFlip(np.zeros(batch_size_per_replica).astype(np.float32))
-    fake_batch = [[el] for el in fake_batch]
-    labels = [fake_batch, energy_batch, ang_batch, ecal_batch]
+    for tfr_file, tfr_shape, tfr_lod in zip(tfr_files, tfr_shapes, tfr_lods):
+        if tfr_lod < 0:
+            continue
 
-    with tf.GradientTape() as tape:
-        predictions = discriminator(generated_images, training=True)
-        fake_batch_loss = compute_global_loss(labels, predictions, batch_size, loss_weights=loss_weights)
-    gradients = tape.gradient(fake_batch_loss, discriminator.trainable_variables) # model.trainable_variables or  model.trainable_weights
-    #gradients = optimizer_discriminator._clip_gradients(gradients)
-    optimizer_discriminator.apply_gradients(zip(gradients, discriminator.trainable_variables)) # model.trainable_variables or  model.trainable_weights
+        #get dataset
+        dset = tf.data.TFRecordDataset(tfr_file, compression_type='', buffer_size=buffer_mb<<20)
+        #use parse function
+        dset = dset.map(parse_tfrecord_tf, num_parallel_calls=num_threads)
+        #join with labels
+        #dset = tf.data.Dataset.zip((dset, self._tf_labels_dataset))
+        #create bytes per item
+        bytes_per_item = np.prod(tfr_shape) * np.dtype(dtype).itemsize
+        #shuffle
+        if shuffle_mb > 0:
+            dset = dset.shuffle(((shuffle_mb << 20) - 1) // bytes_per_item + 1)
+        #repeat    
+        if repeat:
+            dset = dset.repeat()
+        #prefetch
+        if prefetch_mb > 0:
+            dset = dset.prefetch(((prefetch_mb << 20) - 1) // bytes_per_item + 1)
+        #batch
+        dset = dset.batch(batch_size)
+        _tf_datasets[tfr_lod] = dset
+
+    #iterator = iter(dset)
+
+    print('dataset num of lods ' + str(len(_tf_datasets)))
+
+    for key, value in _tf_datasets.items() :
+        print(key)
+
+    return _tf_datasets
 
 
+#----------------------------------------------------------------------------
+# Training Cycle
 
-    trick = np.ones(batch_size_per_replica).astype(np.float32)
-    fake_batch = [[el] for el in trick]
-    labels = [fake_batch, tf.reshape(energy_batch, (-1,1)), ang_batch, ecal_batch]
+def train_cycle():
+    #initialization of variables
+    LR=0.0015
+    BETA_1 = 0.0
+    BETA_2 = 0.99
+    EPSILON = 1e-8
 
-    gen_losses = []
-    # Train generator twice using combined model
-    for _ in range(2):
-        noise = tf.random.normal((batch_size_per_replica, latent_size-2), 0, 1)
-        generator_ip = tf.concat((tf.reshape(energy_batch, (-1,1)), tf.reshape(ang_batch, (-1, 1)), noise),axis=1) # sampled angle same as g4 theta   
+    change = True #it starts at true to be able do do any initializations
+    resolution = 32 #initial resolution
+    max_res = 256 #max res based on the dataset
+    max_res_log2 = int(np.log2(max_res))
 
-        with tf.GradientTape() as tape:
-            generated_images = generator(generator_ip ,training= True)
-            predictions = discriminator(generated_images , training=True)
-            loss = compute_global_loss(labels, predictions, batch_size, loss_weights=loss_weights)
+    minibatch_repeats = 4
+    D_repeats = 1 #not used right now needs to separate discriminator and generator training 
+    n_epochs = 5
 
-        gradients = tape.gradient(loss, generator.trainable_variables) # model.trainable_variables or  model.trainable_weights
-        #gradients = optimizer_generator._clip_gradients(gradients)
-        optimizer_generator.apply_gradients(zip(gradients, generator.trainable_variables)) # model.trainable_variables or  model.trainable_weights
+    #initialization of paths
+    tfrecord_dir = '/home/renato/CProGAN-ME/datasets/tfrecord1024'
 
-        for el in loss:
-            gen_losses.append(el)
+    start_init = time.time()
+    f = [0.9, 0.1] # train, test fractions might be necessary
 
-    return real_batch_loss[0], real_batch_loss[1], real_batch_loss[2], real_batch_loss[3], fake_batch_loss[0], fake_batch_loss[1], fake_batch_loss[2], fake_batch_loss[3], \
-            gen_losses[0], gen_losses[1], gen_losses[2], gen_losses[3], gen_losses[4], gen_losses[5], gen_losses[6], gen_losses[7]  
+    #initialize models and optimizer
+    gen = networks.named_generator_model(resolution) #choose resolution
+    disc = networks.named_discriminator(resolution) #choose resolution
+    D_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+    G_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
 
-    print('Building TensorFlow graph...')
-    with tf.name_scope('Inputs'):
-        lod_in          = tf.placeholder(tf.float32, name='lod_in', shape=[])
-        lrate_in        = tf.placeholder(tf.float32, name='lrate_in', shape=[])
-        minibatch_in    = tf.placeholder(tf.int32, name='minibatch_in', shape=[])
-        minibatch_split = minibatch_in // config.num_gpus
-        reals, labels   = training_set.get_minibatch_tf()
-        reals_split     = tf.split(reals, config.num_gpus)
-        labels_split    = tf.split(labels, config.num_gpus)
-    G_opt = tfutil.Optimizer(name='TrainG', learning_rate=lrate_in, **config.G_opt)
-    D_opt = tfutil.Optimizer(name='TrainD', learning_rate=lrate_in, **config.D_opt)
+    #load data
+    tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir, '*.tfrecords')))
+    dataset_list = get_dataset(tfr_files) #all the images for all the lods
 
-    for gpu in range(config.num_gpus):
-        with tf.name_scope('GPU%d' % gpu), tf.device('/gpu:%d' % gpu):
-            G_gpu = G if gpu == 0 else G.clone(G.name + '_shadow')
-            D_gpu = D if gpu == 0 else D.clone(D.name + '_shadow')
+    #do any necessary data processing
 
-            lod_assign_ops = [tf.assign(G_gpu.find_var('lod'), lod_in), tf.assign(D_gpu.find_var('lod'), lod_in)]
-            reals_gpu = process_reals(reals_split[gpu], lod_in, mirror_augment, training_set.dynamic_range, drange_net)
-            labels_gpu = labels_split[gpu]
-            with tf.name_scope('G_loss'), tf.control_dependencies(lod_assign_ops):
-                G_loss = tfutil.call_func_by_name(G=G_gpu, D=D_gpu,  opt=G_opt, training_set=training_set, minibatch_size=minibatch_split, reals=reals_gpu, **config.G_loss)
-            with tf.name_scope('D_loss'), tf.control_dependencies(lod_assign_ops):
-                D_loss = tfutil.call_func_by_name(G=G_gpu, D=D_gpu, opt=D_opt, training_set=training_set, minibatch_size=minibatch_split, reals=reals_gpu, labels=labels_gpu, **config.D_loss)
-            G_opt.register_gradients(tf.reduce_mean(G_loss), G_gpu.trainables)
-            D_opt.register_gradients(tf.reduce_mean(D_loss), D_gpu.trainables)
-    G_train_op = G_opt.apply_updates()
-    D_train_op = D_opt.apply_updates()
+    # Start training
+    epoch_start = time.time()
+
+    def training_step(batch):
+
+        batch_size = batch.get_shape().as_list()[0]#.numpy()[0]
+        print(batch_size)
+
+        #lod_assign_ops = [tf.assign(G_gpu.find_var('lod'), lod_in), tf.assign(D_gpu.find_var('lod'), lod_in)] #this is probably outside and used to update the dataset/model
+        #reals_gpu = process_reals(reals_split[gpu], lod_in, mirror_augment, training_set.dynamic_range, drange_net) #need to setup this logic
+        #labels_gpu = labels_split[gpu] #probabilly not necessary
+
+        gen_loss = Generator_loss(gen, disc, batch, batch_size, G_optimizer, training_set=None, cond_weight = 1.0)
+
+        disc_loss = Discriminator_loss(gen, disc, batch, batch_size, D_optimizer, training_set=None, labels=None, wgan_lambda = 10.0, wgan_epsilon = 0.001, wgan_target = 1.0, cond_weight = 1.0)  
+
+        return 
+
+    @tf.function
+    def training_step_tf_fuction(dataset):
+        training_step(next(dataset))
+        return
+
+    for epoch in range(n_epochs):
+        print(epoch)
+        # update model / variables (lr, lod, dataset) if needed 
+
+        if change: #lod is 6 for 4x4 and 0 for 256x256
+            resolution_log2 = int(np.log2(resolution))
+            lod = max_res_log2 - resolution_log2
+            dataset = dataset_list[lod]
+            dataset_iter = iter(dataset)
+            change = False
+
+        # Run training ops.
+        for repeat in range(minibatch_repeats):
+            training_step_tf_fuction(dataset_iter)
+
+        #Run Test
+
+
+        #get stats and save model
+        # gen.save_weights('generator.h5')
+        # gen = networks.named_generator_model(64)
+        # gen.load_weights('generator.h5', by_name=True)
+
+        # print('Loaded Model')
+
+    return
+
+
 
 if __name__ == "__main__":
-    print('Constructing networks...')
-    #latents = np.random.randn(120, 3, 128, 128)
-    #networks.G_paper(latents)
-    #latents = tf.random_normal([16, 3, 32, 32])
-    #networks.G_paper(latents)
-
-    real1= tf.random.normal([120, 3, 128, 128])
-    real2= tf.random.normal([120, 3, 128, 128])
-    real3= tf.random.normal([120, 3, 128, 128])
-    #real1=(real1.astype(np.float32)-127.5)/127.5
-    #real2=(real2.astype(np.float32)-127.5)/127.5
-    #real3=(real3.astype(np.float32)-127.5)/127.5
-    print('real3 shape' + str(real3.shape))
-
-    latents = tf.random.normal([120, 3, 128, 128])
-    left = tf.concat([real1, real2], axis=2)
-    right = tf.concat([real3, latents], axis=2)
-    lat_and_cond = tf.concat([left, right], axis=3)
-
-
-
-    #fake_images_out_small = Gs.run(lat_and_cond, grid_labels, minibatch_size=120)
-
-
-
-    latent_size = 256
-    res = 256 
-    #generator=networks.Generator_tf2(latent_size, res, latents_in=lat_and_cond)
-    networks.Generator_model()
-    #left = tf.concat([real1, real2], axis=2)
-    #right = tf.concat([real3, latents], axis=2)
-    #lat_and_cond = tf.concat([left, right], axis=3)
-    #G = networks.Network('G', num_channels=3, resolution=256, func='networks.G_paper')
-    #D = tfutil.Network('D', num_channels=training_set.shape[0], resolution=training_set.shape[1],  **config.D)
+   train_cycle()
+   print('Finished Training')

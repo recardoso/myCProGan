@@ -8,9 +8,9 @@
 import numpy as np
 import tensorflow as tf
 import networks
-import config
+#import config
 
-import tfutil
+#import tfutil
 
 #----------------------------------------------------------------------------
 # Convenience func that casts all of its arguments to tf.float32.
@@ -20,6 +20,9 @@ def fp32(*values):
         values = values[0]
     values = tuple(tf.cast(v, tf.float32) for v in values)
     return values if len(values) >= 2 else values[0]
+
+def lerp(a, b, t):
+    return a + (b - a) * t
 
 #----------------------------------------------------------------------------
 # Generator loss function used in the paper (WGAN + AC-GAN).
@@ -59,6 +62,52 @@ def G_wgan_acgan(G, D, opt, training_set, minibatch_size, reals,
         loss += label_penalty_fakes * cond_weight
         
 
+    
+    
+    return loss
+
+def Generator_loss(G, D, reals, minibatch_size, opt=None, training_set=None, cond_weight = 1.0): # Weight of the conditioning term.
+    print('Mini-batch size G' + str(minibatch_size))
+    size= int(128)    
+    # Conditional GAN Loss
+    real1= reals[:,:, :(size),:(size)]
+    real2= reals[:,:, (size):,:(size)]
+    real3= reals[:,:, :(size),(size):]
+    real4= reals[:,:, :(size), :(size)]
+    
+   
+    #generate fakes
+    latents = tf.random_normal([minibatch_size, 3, size, size])
+    left = tf.concat([real1, real2], axis=2)
+    right = tf.concat([real3, latents], axis=2)
+    lat_and_cond = tf.concat([left, right], axis=3)
+
+    
+    print('lat_and_cond : ' + str(lat_and_cond))
+
+    #get labels  (are there any labels???)
+    #labels = training_set.get_random_labels_tf(minibatch_size)
+
+
+    #fake_images_out_small = G.get_output_for(lat_and_cond, labels, is_training=True)
+
+    with tf.GradientTape() as tape:
+        fake_images_out_small = G(lat_and_cond, training=True)
+        fake_image_out_right = tf.concat([real3, fake_images_out_small], axis=2)
+        fake_image_out_left = tf.concat([real1, real2], axis=2)
+        fake_images_out = tf.concat([fake_image_out_left, fake_image_out_right], axis=3)
+        fake_scores_out, fake_labels_out = D(fake_images_out , training=True)
+        loss = -fake_scores_out
+
+    
+    #add label penalty (are there any labels???)
+    #if D.output_shapes[1][1] > 0:
+    #    with tf.name_scope('LabelPenalty'):
+    #        label_penalty_fakes = tf.nn.softmax_cross_entropy_with_logits_v2(labels=labels, logits=fake_labels_out)
+    #    loss += label_penalty_fakes * cond_weight
+        
+    gradients =  tape.gradient(loss, G.trainable_variables) # model.trainable_variables or  model.trainable_weights
+    opt.apply_gradients(zip(gradients, G.trainable_variables)) # model.trainable_variables or  model.trainable_weights
     
     
     return loss
@@ -126,3 +175,92 @@ def D_wgangp_acgan(G, D,opt, training_set, minibatch_size, reals, labels,
     return loss
 
 #----------------------------------------------------------------------------
+
+def Discriminator_loss(G, D, reals, minibatch_size, opt, training_set=None, labels=None,
+    wgan_lambda     = 10.0,     # Weight for the gradient penalty term.
+    wgan_epsilon    = 0.001,    # Weight for the epsilon term, \epsilon_{drift}.
+    wgan_target     = 1.0,      # Target value for gradient magnitudes.
+    cond_weight     = 1.0):     # Weight of the conditioning terms.
+
+    #loss scalling (it is not doing loss scalling) !!!!
+
+    print('Mini-batch size D' + str(minibatch_size))
+    size= int(128)
+    print('real shape' + str(reals.shape))
+    
+    #get reals:
+    real1= reals[:,:, :(size),:(size)]
+    real2= reals[:,:, (size):,:(size)]
+    real3= reals[:,:, :(size),(size):]
+    real4= reals[:,:, :(size), :(size)]
+    
+    #generate noise image
+    latents = tf.random_normal([minibatch_size, 3, size, size])
+    left = tf.concat([real1, real2], axis=2)
+    right = tf.concat([real3, latents], axis=2)
+    lat_and_cond = tf.concat([left, right], axis=3)
+    
+    #get labels???
+    #labels = training_set.get_random_labels_tf(minibatch_size)
+
+    #needs two gradient tapes because we use the gradeients from the mixed images for the penalties
+    with tf.GradientTape(persistent=True) as grad_total_tape:
+        #generate fake image
+        #inside gradient tape
+        with tf.GradientTape() as grad_penalty_tape:
+            fake_images_out_small = G(lat_and_cond, training=True)
+            #fake_images_out_small = G.get_output_for(lat_and_cond, labels, is_training=True)
+            fake_image_out_right = tf.concat([real3, fake_images_out_small], axis=2)
+            fake_image_out_left = tf.concat([real1, real2], axis=2)
+            fake_images_out = tf.concat([fake_image_out_left, fake_image_out_right], axis=3)
+
+            #Apply a gradient penalty
+            #needs to be inside a gradient tape to obtain the gradients at the end
+            #mixing factors
+            mixing_factors = tf.random_uniform([minibatch_size, 1, 1, 1], 0.0, 1.0, dtype=fake_images_out.dtype)
+            #mixed images
+            mixed_images_out = lerp(tf.cast(reals, fake_images_out.dtype), fake_images_out, mixing_factors)
+            #get mixed scores
+            #mixed_scores_out, mixed_labels_out = fp32(D(mixed_images_out, training=True))
+            mixed_scores_out, mixed_labels_out = D(mixed_images_out, training=True)
+            #final mixed loss
+            mixed_loss = tf.reduce_sum(mixed_scores_out)
+
+        #get mixed gradients
+        mixed_grads = fp32(grad_penalty_tape.gradient(mixed_loss, [mixed_images_out])[0])
+
+        # normalize gradients
+        mixed_norms = tf.sqrt(tf.reduce_sum(tf.square(mixed_grads), axis=[1,2,3]))
+
+        #apply penalty
+        gradient_penalty = tf.square(mixed_norms - wgan_target)
+        loss = gradient_penalty * (wgan_lambda / (wgan_target**2))
+
+        real_scores_out, real_labels_out = D(reals, training=True)
+        fake_scores_out, fake_labels_out = D(fake_images_out, training=True)
+        #real_scores_out, real_labels_out = fp32(D.get_output_for(reals, is_training=True))
+        #fake_scores_out, fake_labels_out = fp32(D.get_output_for(fake_images_out, is_training=True))
+
+        loss += fake_scores_out - real_scores_out
+
+        #epsilon penalty
+        epsilon_penalty = tf.square(real_scores_out)
+        loss += epsilon_penalty * wgan_epsilon
+
+    gradients =  grad_total_tape.gradient(loss, D.trainable_variables) # model.trainable_variables or  model.trainable_weights
+    opt.apply_gradients(zip(gradients, D.trainable_variables)) # model.trainable_variables or  model.trainable_weights
+
+    #there are no labels???
+    # if D.output_shapes[1][1] > 0:
+    #     with tf.name_scope('LabelPenalty'):
+    #         label_penalty_reals = tf.nn.softmax_cross_entropy_with_logits_v2(labels=labels, logits=real_labels_out)
+    #         label_penalty_fakes = tf.nn.softmax_cross_entropy_with_logits_v2(labels=labels, logits=fake_labels_out)
+    #         label_penalty_reals = tfutil.autosummary('Loss/label_penalty_reals', label_penalty_reals)
+    #         label_penalty_fakes = tfutil.autosummary('Loss/label_penalty_fakes', label_penalty_fakes)
+    #     loss += (label_penalty_reals + label_penalty_fakes) * cond_weight
+
+
+    #apply gradients wwith optimizes
+
+
+    return loss
