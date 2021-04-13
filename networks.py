@@ -28,7 +28,7 @@ from tensorflow.keras.layers import Layer, InputSpec, Conv2D, Conv2DTranspose, A
 from tensorflow.keras.layers import Input, UpSampling2D, Dropout, Concatenate, Add, Dense, Multiply, LeakyReLU, Flatten, AveragePooling2D, Multiply
 
 #Use for tensorflow 2
-#from tensorflow.python.keras.layers.ops import core as core_ops
+from tensorflow.python.keras.layers.ops import core as core_ops
 
 def lerp(a, b, t): return a + (b - a) * t
 def lerp_clip(a, b, t): return a + (b - a) * tf.clip_by_value(t, 0.0, 1.0)
@@ -38,7 +38,6 @@ def cset(cur_lambda, new_cond, new_lambda): return lambda: tf.cond(new_cond, new
 # Get/create weight tensor for a convolutional or fully-connected layer.
 
 def get_weight(shape, gain=np.sqrt(2), use_wscale=False, fan_in=None):
-    print(shape)
     if fan_in is None: fan_in = np.prod(shape[:-1])
     std = gain / np.sqrt(fan_in) # He init
     if use_wscale:
@@ -183,9 +182,7 @@ class DenseLReq(Dense):
         #super().__init__(kernel_initializer=normal(0,1), **kwargs)
 
         #do I need to pass the units or the initializer??
-        print(args[0])
         shape = [input_shape_value, args[0]]
-        print(shape)
         if fan_in is None: fan_in = np.prod(shape[:-1])
         self.fan_in = fan_in
         self.gain = gain
@@ -232,20 +229,20 @@ class DenseLReq(Dense):
 
         # Use for tensorflow 2
 
-        #return core_ops.dense(
-        #    inputs,
-        #    self.kernel*self.wscale,
-        #    self.bias,
-        #    self.activation,
-        #    dtype=self._compute_dtype_object)
+        return core_ops.dense(
+           inputs,
+           self.kernel*self.wscale,
+           self.bias,
+           self.activation,
+           dtype=self._compute_dtype_object)
 
 
-        output = K.dot(inputs, self.kernel*self.wscale) # scale kernel
-        if self.use_bias:
-            output = K.bias_add(output, self.bias, data_format='channels_first')
-        if self.activation is not None:
-            output = self.activation(output)
-        return output
+        # output = K.dot(inputs, self.kernel*self.wscale) # scale kernel
+        # if self.use_bias:
+        #     output = K.bias_add(output, self.bias, data_format='channels_first')
+        # if self.activation is not None:
+        #     output = self.activation(output)
+        # return output
 
 
 class Conv2DLReq(Conv2D):
@@ -256,9 +253,7 @@ class Conv2DLReq(Conv2D):
         #super().__init__(kernel_initializer=normal(0,1), **kwargs)
 
         #do I need to pass the units or the initializer??
-        print(args[0])
         shape = [input_shape_value, args[0]]
-        print(shape)
         if fan_in is None: fan_in = np.prod(shape[:-1])
         self.fan_in = fan_in
         self.gain = gain
@@ -300,7 +295,7 @@ class Lerp_clip_layer(tf.keras.layers.Layer):
     def call(self, inputs):
         a = inputs[0]
         b = inputs[1]
-        t = inputs[2]
+        t = 0.0 #inputs[2]
         return a + (b - a) * tf.clip_by_value(t, 0.0, 1.0)
         
 
@@ -331,7 +326,7 @@ class Pixel_norm_layer(tf.keras.layers.Layer):
         self.epsilon = epsilon
 
     def call(self, inputs):
-        return inputs * tf.rsqrt(tf.reduce_mean(tf.square(inputs), axis=1, keepdims=True) + self.epsilon)    
+        return inputs * tf.math.rsqrt(tf.reduce_mean(tf.square(inputs), axis=1, keepdims=True) + self.epsilon)    
         
 
 
@@ -581,11 +576,13 @@ def Generator_model(resolution=256,num_channels=3,lod_in = 0.0): #confirm params
  
 
 
-def named_generator_model(resolution=256,num_channels=3,lod_in = 0.0): #confirm params and confirm initializers strides bias
+def named_generator_model(resolution=256,num_channels=3): #confirm params and confirm initializers strides bias
     resolution_log2 = int(np.log2(resolution))
     dshape=( 3, resolution, resolution) 
     normal_gain = np.sqrt(2)
     latent = Input(shape=dshape)
+    #lod_in = Input(shape=(1,))
+    lod_in= Input(shape=(1), batch_size=1, name='lod_in')
     #lod_in = tf.cast(tf.Variable(initial_value=np.float32(0.0), trainable=False), 'float32')
 
     fmap_base           = 8192        # Overall multiplier for the number of feature maps.
@@ -593,15 +590,17 @@ def named_generator_model(resolution=256,num_channels=3,lod_in = 0.0): #confirm 
     fmap_max            = 128          # Maximum number of feature maps in any layer.
 
     def nf(stage): 
-        print('stage ' + str(stage))
+        #print('stage ' + str(stage))
         fm = min(int(fmap_base / (2.0 ** (stage * fmap_decay))), fmap_max)
-        print(fm)
+        #print(fm)
         return fm
+
+    print(latent.shape[1])
 
     # -----------------------------------------------------------------------------------------------------------------
     # Encoder ---------------------------------------------------------------------------------------------------------
     # convert from rgb ------------------------------------
-    x = Conv2DLReq(latent.shape[1].value, None, normal_gain, num_channels, kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/FromRGB_lod' % (2**resolution_log2, 2**resolution_log2))(latent)
+    x = Conv2DLReq(latent.shape[1], None, normal_gain, num_channels, kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/FromRGB_lod' % (2**resolution_log2, 2**resolution_log2))(latent)
     #x = Conv2D(3, kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones')(latent)
     x = LeakyReLU()(x)
     y = x
@@ -611,20 +610,21 @@ def named_generator_model(resolution=256,num_channels=3,lod_in = 0.0): #confirm 
     for res in range(resolution_log2, 4, -1):
         #x = tf.nn.avg_pool(x, ksize=ksize, strides=ksize, padding='VALID', data_format='NCHW') # NOTE: requires tf_config['graph_options.place_pruned_graph'] = True
         #x = Conv2D(128, kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones')(x)
-        x = Conv2DLReq(x.shape[1].value, None, normal_gain, 128, kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones',name='%dx%d/Conv_down%d' % (2**resolution_log2, 2**resolution_log2, res))(x)
+        x = Conv2DLReq(x.shape[1], None, normal_gain, 128, kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones',name='%dx%d/Conv_down%d' % (2**resolution_log2, 2**resolution_log2, res))(x)
         x = AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding='valid', data_format='channels_first')(x)
         x = LeakyReLU()(x)
 
     # -----------------------------------------------------
     # final downscale -------------------------------------
     #x = Conv2D(32, kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones')(x)
-    x = Conv2DLReq(x.shape[1].value, None, normal_gain, 32, kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='Conv_down4')(x)
+    x = Conv2DLReq(x.shape[1], None, normal_gain, 32, kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='Conv_down4')(x)
     x = AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding='valid', data_format='channels_first')(x)
     x = LeakyReLU()(x)
     # -----------------------------------------------------
     # Dense -----------------------------------------------
-    x = tf.reshape(x, [-1, np.prod([d.value for d in x.shape[1:]])])
-    x = DenseLReq(x.shape[1].value, None, normal_gain, 2048, bias_initializer='ones', name='Dense0up')(x)
+    x = tf.reshape(x, [-1, np.prod([d for d in x.shape[1:]])])
+    print(x.shape)
+    x = DenseLReq(x.shape[1], None, normal_gain, 2048, bias_initializer='ones', name='Dense0up')(x)
     x = LeakyReLU()(x)
     # -----------------------------------------------------
     # Pixel Normalization ---------------------------------
@@ -635,7 +635,7 @@ def named_generator_model(resolution=256,num_channels=3,lod_in = 0.0): #confirm 
     # -----------------------------------------------------
     # Combo_in --------------------------------------------
     #x = Dense(2048, bias_initializer='ones')(x)
-    x = DenseLReq(x.shape[1].value, None, normal_gain, 2048, bias_initializer='ones', name='Dense1up')(x)
+    x = DenseLReq(x.shape[1], None, normal_gain, 2048, bias_initializer='ones', name='Dense1up')(x)
     x = LeakyReLU()(x)
 
     # -----------------------------------------------------------------------------------------------------------------
@@ -655,13 +655,13 @@ def named_generator_model(resolution=256,num_channels=3,lod_in = 0.0): #confirm 
     x = UpSampling2D(size=(2, 2), data_format='channels_first', interpolation='nearest')(x)
     # use transpose? <------
     #x = Conv2D(64, kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones')(x)
-    x = Conv2DLReq(x.shape[1].value, None, normal_gain, 64, kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv' % (2**5, 2**5))(x)
+    x = Conv2DLReq(x.shape[1], None, normal_gain, 64, kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv' % (2**5, 2**5))(x)
     x = LeakyReLU()(x)
     x = Pixel_norm_layer(epsilon=1e-8)(x) # Pixel Normalization
 
     # -----------------------------------------------------
     # to rgb ----------------------------------------------
-    images_out = Conv2DLReq(x.shape[1].value, None, 1 , num_channels, kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/ToRGB_lod' % (2**5, 2**5))(x)
+    images_out = Conv2DLReq(x.shape[1], None, 1 , num_channels, kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/ToRGB_lod' % (2**5, 2**5))(x)
     
     #Model(inputs=[latent], outputs=[images_out]).summary()
     #return
@@ -672,34 +672,36 @@ def named_generator_model(resolution=256,num_channels=3,lod_in = 0.0): #confirm 
         lod = resolution_log2 - res
         y_temp=y
         for r in range(resolution_log2, res-1, -1):
-            y_temp = Conv2DLReq(y_temp.shape[1].value, None, normal_gain, nf(res-5), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv_down%d_%d' %(2**res, 2**res, res, r))(y_temp)
+            y_temp = Conv2DLReq(y_temp.shape[1], None, normal_gain, nf(res-5), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv_down%d_%d' %(2**res, 2**res, res, r))(y_temp)
             y_temp = AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding='valid', data_format='channels_first')(y_temp)
             y_temp = LeakyReLU()(y_temp)
 
         x = UpSampling2D(size=(2, 2), data_format='channels_first', interpolation='nearest')(x)
         x = tf.concat([x, y_temp], axis=1)
 
-        x = Conv2DLReq(x.shape[1].value, None, normal_gain, nf(res-5), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/ConvConcat'% (2**res, 2**res))(x)
+        x = Conv2DLReq(x.shape[1], None, normal_gain, nf(res-5), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/ConvConcat'% (2**res, 2**res))(x)
         x = LeakyReLU()(x)
         x = Pixel_norm_layer(epsilon=1e-8)(x) # Pixel Normalization
 
-        x = Conv2DLReq(x.shape[1].value, None, normal_gain, nf(res-5), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv0'% (2**res, 2**res))(x)
+        x = Conv2DLReq(x.shape[1], None, normal_gain, nf(res-5), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv0'% (2**res, 2**res))(x)
         x = LeakyReLU()(x)
         x = Pixel_norm_layer(epsilon=1e-8)(x) # Pixel Normalization
 
-        x = Conv2DLReq(x.shape[1].value, None, normal_gain, nf(res-5), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv1'% (2**res, 2**res))(x)
+        x = Conv2DLReq(x.shape[1], None, normal_gain, nf(res-5), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv1'% (2**res, 2**res))(x)
         x = LeakyReLU()(x)
         x = Pixel_norm_layer(epsilon=1e-8)(x) # Pixel Normalization
     
-        img = Conv2DLReq(x.shape[1].value, None, 1 , num_channels, kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/ToRGB_lod' % (2**res, 2**res))(x)
+        img = Conv2DLReq(x.shape[1], None, 1 , num_channels, kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/ToRGB_lod' % (2**res, 2**res))(x)
 
         images_out = UpSampling2D(size=(2, 2), data_format='channels_first', interpolation='nearest')(images_out)
 
         images_out = lerp_clip(img, images_out, lod_in - lod)
 
-    Model(inputs=[latent], outputs=[images_out]).summary()
+    images_out = tf.identity(images_out, name='images_out')
+
+    Model(inputs=[latent, lod_in], outputs=[images_out]).summary()
     
-    return Model(inputs=[latent], outputs=[images_out])
+    return Model(inputs=[latent, lod_in], outputs=[images_out])
 
 
 #----------------------------------------------------------------------------
@@ -863,12 +865,19 @@ def Discriminator_model(resolution=256,num_channels=3, lod_in = 0.0, label_size 
     
     return Model(inputs=[images_in], outputs=[scores_out, labels_out])
 
-def named_discriminator(resolution=256, num_channels=3, lod_in = 0.0, label_size = 0, mbstd_group_size = 4, old_res=128):
+def named_discriminator(resolution=256, num_channels=3, label_size = 0, mbstd_group_size = 4, old_res=128):
     resolution_log2 = int(np.log2(resolution))
     dshape=( num_channels, resolution, resolution) 
     normal_gain = np.sqrt(2)
     images_in = Input(shape=dshape)
+    lod_in= Input(shape=(1), batch_size=1, name='lod_in')
+    #lod_in = tf.squeeze(lod_in_input, axis=0)
+    #lod_in = lod_in_input
+    #print(lod_in)
     #lod_in = tf.cast(tf.Variable(initial_value=np.float32(0.0), trainable=False), 'float32')
+
+    #lod_in = tf.Variable(initial_value=0.0, trainable=False)
+    #lod = tf.Variable(initial_value=0.0, trainable=False)
 
     #TODO: Final 2 dense layers too sharp: add one or more dense layers in the middle
 
@@ -885,48 +894,50 @@ def named_discriminator(resolution=256, num_channels=3, lod_in = 0.0, label_size
     img = images_in
     # convert from rgb ------------------------------------
     #x = Conv2DLReq(img.shape[1].value, None, normal_gain, nf(resolution_log2-1), kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='FromRGB_lod%d' % (resolution_log2 - resolution_log2))(img)
-    x = Conv2DLReq(img.shape[1].value, None, normal_gain, nf(resolution_log2-1), kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/FromRGB_lod' % (2**resolution_log2, 2**resolution_log2))(img)
+    x = Conv2DLReq(img.shape[1], None, normal_gain, nf(resolution_log2-1), kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/FromRGB_lod' % (2**resolution_log2, 2**resolution_log2))(img)
     x = LeakyReLU()(x)
 
     i = 0
 
     for res in range(resolution_log2, 2, -1):
         lod = resolution_log2 - res
+        #lod.assign(resolution_log2 - res)
         if res >= 3: # 8x8 and up
-            x = Conv2DLReq(x.shape[1].value, None, normal_gain, nf(res-1), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv0' % (2**res, 2**res))(x)
+            x = Conv2DLReq(x.shape[1], None, normal_gain, nf(res-1), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv0' % (2**res, 2**res))(x)
             x = LeakyReLU()(x)
-            x = Conv2DLReq(x.shape[1].value, None, normal_gain, nf(res-2), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv1' % (2**res, 2**res))(x)
+            x = Conv2DLReq(x.shape[1], None, normal_gain, nf(res-2), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv1' % (2**res, 2**res))(x)
             x = LeakyReLU()(x)
             x = AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding='valid', data_format='channels_first')(x)
         else:
             if mbstd_group_size > 1:
                 x = Minibatch_stddev_layer(mbstd_group_size)(x) # <-------
-            x = Conv2DLReq(x.shape[1].value, None, normal_gain, nf(res-1), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones',name='%dx%d/Conv' % (2**res, 2**res))(x)
+            x = Conv2DLReq(x.shape[1], None, normal_gain, nf(res-1), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones',name='%dx%d/Conv' % (2**res, 2**res))(x)
             x = LeakyReLU()(x)
-            x = tf.reshape(x, [-1, np.prod([d.value for d in x.shape[1:]])])
-            x = DenseLReq(x.shape[1].value, None, normal_gain, nf(res-2), bias_initializer='ones', name='%dx%d/Dense0' % (2**res, 2**res))(x)
+            x = tf.reshape(x, [-1, np.prod([d for d in x.shape[1:]])])
+            x = DenseLReq(x.shape[1], None, normal_gain, nf(res-2), bias_initializer='ones', name='%dx%d/Dense0' % (2**res, 2**res))(x)
             x = LeakyReLU()(x)
-            x = tf.reshape(x, [-1, np.prod([d.value for d in x.shape[1:]])])
-            x = DenseLReq(x.shape[1].value, None, 1, 1+label_size, bias_initializer='ones', name='%dx%d/Dense1' % (2**res, 2**res))(x)
+            x = tf.reshape(x, [-1, np.prod([d for d in x.shape[1:]])])
+            x = DenseLReq(x.shape[1], None, 1, 1+label_size, bias_initializer='ones', name='%dx%d/Dense1' % (2**res, 2**res))(x)
 
         img = AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding='valid', data_format='channels_first')(img)
         #x = LeakyReLU()(x)
-        y = Conv2DLReq(img.shape[1].value, None, normal_gain, nf(res-1-1), kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/FromRGB_lod' % (2**(res - 1), 2**(res - 1)))(img)
+        y = Conv2DLReq(img.shape[1], None, normal_gain, nf(res-1-1), kernel_size=1, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/FromRGB_lod' % (2**(res - 1), 2**(res - 1)))(img)
         y = LeakyReLU()(y)
 
-        x = Lerp_clip_layer()([x, y, lod_in - lod])
-        #x = lerp_clip(x, y, lod_in - lod)
+
+        #x = Lerp_clip_layer()([x, y])
+        x = lerp_clip(x, y, lod_in - lod)
 
 
     if mbstd_group_size > 1:
         x = Minibatch_stddev_layer(mbstd_group_size)(x) # <-------
-    x = Conv2DLReq(x.shape[1].value, None, normal_gain, nf(2-1), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv' % (4, 4))(x)
+    x = Conv2DLReq(x.shape[1], None, normal_gain, nf(2-1), kernel_size=3, strides=(1,1), data_format='channels_first',padding='same', bias_initializer='ones', name='%dx%d/Conv' % (4, 4))(x)
     x = LeakyReLU()(x)
-    x = tf.reshape(x, [-1, np.prod([d.value for d in x.shape[1:]])])
-    x = DenseLReq(x.shape[1].value, None, normal_gain, nf(2-2), bias_initializer='ones', name='%dx%d/Dense0' % (4, 4))(x)
+    x = tf.reshape(x, [-1, np.prod([d for d in x.shape[1:]])])
+    x = DenseLReq(x.shape[1], None, normal_gain, nf(2-2), bias_initializer='ones', name='%dx%d/Dense0' % (4, 4))(x)
     x = LeakyReLU()(x)
-    x = tf.reshape(x, [-1, np.prod([d.value for d in x.shape[1:]])])
-    x = DenseLReq(x.shape[1].value, None, 1, 1+label_size, bias_initializer='ones', name='%dx%d/Dense1' % (4, 4))(x)
+    x = tf.reshape(x, [-1, np.prod([d for d in x.shape[1:]])])
+    x = DenseLReq(x.shape[1], None, 1, 1+label_size, bias_initializer='ones', name='%dx%d/Dense1' % (4, 4))(x)
     combo_out = x
 
 
@@ -936,7 +947,7 @@ def named_discriminator(resolution=256, num_channels=3, lod_in = 0.0, label_size
 
 
 
-    Model(inputs=[images_in], outputs=[scores_out, labels_out]).summary()
+    Model(inputs=[images_in, lod_in], outputs=[scores_out, labels_out]).summary()
     
-    return Model(inputs=[images_in], outputs=[scores_out, labels_out])
+    return Model(inputs=[images_in, lod_in], outputs=[scores_out, labels_out])
 
