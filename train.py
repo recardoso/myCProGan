@@ -15,6 +15,12 @@ from tensorflow.keras.optimizers import Adam
 
 from tensorflow.keras.utils import to_categorical, plot_model
 
+from PIL import Image
+
+import pickle
+
+
+
 
 def adjust_dynamic_range(data, drange_in, drange_out):
     if drange_in != drange_out:
@@ -47,7 +53,7 @@ def process_reals(x, lod, mirror_augment, drange_data, drange_net):
     y = tf.reshape(y, [-1, s[1], s[2], s[3]])
     x = lerp(x, y, lod - tf.floor(lod))
 
-    # Upscale to match the expected input/output size of the networks.
+    # Upscale to match the expected input/output size of the networks. 256x256
     s = tf.shape(x)
     factor = tf.cast(2 ** tf.floor(lod), tf.int32)
     x = tf.reshape(x, [-1, s[1], s[2], 1, s[3], 1])
@@ -99,6 +105,9 @@ def determine_shape(tfr_files, resolution = None):
 
 #creates a dataset for each lod (level of detail)
 def get_dataset(tfr_files,      # Directory containing a collection of tfrecords files.
+    minibatch_base  = 16,
+    minibatch_dict  = {},
+    max_minibatch_per_gpu = {},
     num_gpus        = 1,        #number of gpus
     resolution      = None,     # Dataset resolution, None = autodetect.
     label_file      = None,     # Relative path of the labels file, None = autodetect.
@@ -118,13 +127,13 @@ def get_dataset(tfr_files,      # Directory containing a collection of tfrecords
     _tf_datasets=dict()
     _tf_batch_sizes = dict()
 
-    print(tfr_shapes)
-    print(tfr_lods)
+    #print(tfr_shapes)
+    #print(tfr_lods)
 
     #calculate minibatch size for batching
-    minibatch_base = 16
-    minibatch_dict = {4: 512, 8: 256, 16: 128, 32: 64, 64: 32, 128: 16}
-    max_minibatch_per_gpu = {256: 8, 512: 4, 1024: 2}
+    # minibatch_base = 16
+    # minibatch_dict = {4: 512, 8: 256, 16: 128, 32: 64, 64: 32, 128: 16}
+    # max_minibatch_per_gpu = {256: 8, 512: 4, 1024: 2}
 
     for tfr_file, tfr_shape, tfr_lod in zip(tfr_files, tfr_shapes, tfr_lods):
         if tfr_lod < 0:
@@ -134,6 +143,7 @@ def get_dataset(tfr_files,      # Directory containing a collection of tfrecords
         batch_size -= batch_size % num_gpus
         if tfr_shape[-1] in max_minibatch_per_gpu:
             batch_size = min(batch_size, max_minibatch_per_gpu[tfr_shape[-1]] * num_gpus)
+
 
         #get dataset
         dset = tf.data.TFRecordDataset(tfr_file, compression_type='', buffer_size=buffer_mb<<20)
@@ -159,11 +169,6 @@ def get_dataset(tfr_files,      # Directory containing a collection of tfrecords
         _tf_batch_sizes[tfr_lod] = int(batch_size)
 
     #iterator = iter(dset)
-
-    print('dataset num of lods ' + str(len(_tf_datasets)))
-
-    for key, value in _tf_datasets.items() :
-        print(key)
 
     print('Dataset Read')
 
@@ -215,6 +220,7 @@ def TrainingSchedule(
     D_lrate = D_lrate_dict.get(resolution, D_lrate_base)
     tick_kimg = tick_kimg_dict.get(resolution, tick_kimg_base)
 
+    lod = np.float32(lod)
     return lod, resolution, G_lrate, D_lrate
 
 
@@ -227,12 +233,10 @@ def TrainingSchedule(
 
 def train_cycle():
     #initialization of variables
-    LR=0.0015
     BETA_1 = 0.0
     BETA_2 = 0.99
     EPSILON = 1e-8
 
-    change = True #it starts at true to be able do do any initializations
     init_res = 32 #initial resolution
     max_res = 256 #max res based on the dataset
     max_res_log2 = int(np.log2(max_res))
@@ -240,93 +244,214 @@ def train_cycle():
     curr_res_log2 = int(np.log2(init_res))
     prev_res = -1
 
-    #for 4 GPUS
+    change_model = False #if the model is increased based on resolution
+    
+    use_gpus = True
+    use_multi_gpus = False
+
+    #for 8 GPUS
     lod_training_kimg = 300
     lod_transition_kimg = 1500
 
-    minibatch_base = 16
-    minibatch_dict = {4: 512, 8: 256, 16: 128, 32: 64, 64: 32, 128: 16}
-    max_minibatch_per_gpu = {256: 8, 512: 4, 1024: 2}
+    minibatch_base = 32
+    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 64, 64: 64, 128: 32}
+    max_minibatch_per_gpu = {256: 16, 512: 8, 1024: 8}
     G_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
     D_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
     total_kimg = 12000
 
+    #for 4 GPUS
+    # lod_training_kimg = 300
+    # lod_transition_kimg = 1500
+
+    # minibatch_base = 16
+    # minibatch_dict = {4: 512, 8: 256, 16: 128, 32: 64, 64: 32, 128: 16}
+    # max_minibatch_per_gpu = {256: 8, 512: 4, 1024: 2}
+    # G_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
+    # D_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
+    # total_kimg = 12000
+
+    #for 1 GPU
+    # lod_training_kimg = 300
+    # lod_transition_kimg = 1500
+
+    # minibatch_base = 4
+    # minibatch_dict = {4: 128, 8: 64, 16: 32, 32: 16, 64: 8, 128: 4}
+    # max_minibatch_per_gpu = {256: 2, 512: 2, 1024: 2}
+    # G_lrate_dict = {256: 0.0015}
+    # D_lrate_dict = {256: 0.0015}
+    # total_kimg = 12000
+
+    #training repeats
     minibatch_repeats = 4
     D_repeats = 1 #not used right now needs to separate discriminator and generator training 
-    n_epochs = 10
+    n_epochs = 50
     curr_image = 0
 
     #initialization of paths
-    tfrecord_dir = '/home/renato/dataset'
+    #tfrecord_dir = '/home/renato/dataset'
+    tfrecord_dir = '/home/renato/dataset/satimages'
 
     start_init = time.time()
     f = [0.9, 0.1] # train, test fractions might be necessary
 
+    #net_size
+    net_size = init_res
+
+    #start strategy
+    if use_gpus:
+        strategy = tf.distribute.MirroredStrategy()
+        use_stategy = True
+    elif use_multi_gpus:
+        strategy = tf.distribute.MirroredStrategy()
+        use_stategy = True
+    #elif use_tpu:
+    else:
+        use_stategy = False
+
+
     #initialize models and optimizer
-    gen = networks.named_generator_model(init_res) #choose resolution
-    #plot_model(gen, show_shapes=True, dpi=64)
-    disc = networks.named_discriminator(init_res) #choose resolution
-    #plot_model(disc, show_shapes=True, dpi=64)
-    D_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
-    G_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+    if use_stategy:
+        print ('Number of devices: {}'.format(strategy.num_replicas_in_sync))
+        num_replicas = strategy.num_replicas_in_sync
+        if change_model:
+            with strategy.scope():
+                gen = networks.named_generator_model(init_res, num_replicas = num_replicas) #choose resolution
+                #plot_model(gen, show_shapes=True, dpi=64)
+                disc = networks.named_discriminator(init_res, num_replicas = num_replicas) #choose resolution
+                #plot_model(disc, show_shapes=True, dpi=64)
+        else:
+            with strategy.scope():
+                gen = networks.named_generator_model(256, num_replicas = num_replicas)
+                #gen = networks.named_generator_model(256, num_replicas = num_replicas) #choose resolution
+                #plot_model(gen, show_shapes=True, dpi=64)
+                disc = networks.named_discriminator(256, num_replicas = num_replicas) #choose resolution
+                #plot_model(disc, show_shapes=True, dpi=64)
+    else:
+        if change_model:
+            gen = networks.named_generator_model(init_res) #choose resolution
+            #plot_model(gen, show_shapes=True, dpi=64)
+            disc = networks.named_discriminator(init_res) #choose resolution
+            #plot_model(disc, show_shapes=True, dpi=64)
+        else:
+            gen = networks.named_generator_model(256) #choose resolution
+            #plot_model(gen, show_shapes=True, dpi=64)
+            disc = networks.named_discriminator(256) #choose resolution
+            #plot_model(disc, show_shapes=True, dpi=64)
+
+    #D_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+    #G_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
 
     #load data
     tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir, '*.tfrecords')))
-    dataset_list, batch_sizes_list = get_dataset(tfr_files, num_gpus=num_replicas) #all the images for all the lods
+    dataset_list, batch_sizes_list = get_dataset(tfr_files, num_gpus=num_replicas, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu) #all the images for all the lods
+    if use_stategy:
+        distributed_dataset = {}
+        for key, value in dataset_list.items():
+            distributed_dataset[key] = strategy.experimental_distribute_dataset(value)
 
     #do any necessary data processing
 
     # Start training
     epoch_start = time.time()
 
-    def training_step(batch):
+    def training_step(batch, lod_in_value):
 
-        #print(batch)
-        #batch_size = 120
-        #batch.get_shape().as_list()[0]#.numpy()[0]
-        #tf.print(batch)
-        #print(batch_size)
-
-        lod_in= tf.zeros([1, 1])
-        lod_in_value = 0.0
+        #lod_in = tf.constant([[lod_in_value]])
+        #lod_in = tf.constant(lod_in_value, shape=(num_replicas, 1))
+        lod_in = lod_in_value
         mirror_augment = False
         drange_net = [-1,1]
         drange_data = [0, 255]
-        net_size = resolution
 
         batch = process_reals(batch, lod_in_value, mirror_augment, drange_data, drange_net)
+        #return batch
 
-        #return
+        gen_loss = loss.Generator_loss(gen, disc, batch, batch_size, G_optimizer, lod_in=lod_in, training_set=None, cond_weight = 1.0, network_size=net_size, global_batch_size = global_batch_size)
+        disc_loss = loss.Discriminator_loss(gen, disc, batch, batch_size, D_optimizer, lod_in=lod_in, training_set=None, labels=None, wgan_lambda = 10.0, wgan_epsilon = 0.001, wgan_target = 1.0, cond_weight = 1.0,  network_size=net_size, global_batch_size = global_batch_size)  
 
-        #lod_assign_ops = [tf.assign(G_gpu.find_var('lod'), lod_in), tf.assign(D_gpu.find_var('lod'), lod_in)] #this is probably outside and used to update the dataset/model
-        #reals_gpu = process_reals(reals_split[gpu], lod_in, mirror_augment, training_set.dynamic_range, drange_net) #need to setup this logic
-        #labels_gpu = labels_split[gpu] #probabilly not necessary
+        #gen_loss = loss.original_Generator_loss(gen, disc, batch, batch_size, G_optimizer, lod_in=lod_in, training_set=None, cond_weight = 1.0, network_size=net_size, global_batch_size = global_batch_size)
+        #disc_loss = loss.original_Discriminator_loss(gen, disc, batch, batch_size, D_optimizer, lod_in=lod_in, training_set=None, labels=None, wgan_lambda = 10.0, wgan_epsilon = 0.001, wgan_target = 1.0, cond_weight = 1.0,  network_size=net_size, global_batch_size = global_batch_size)
 
-        gen_loss = loss.Generator_loss(gen, disc, batch, batch_size, G_optimizer, lod_in=lod_in, training_set=None, cond_weight = 1.0, network_size=net_size)
-        disc_loss = loss.Discriminator_loss(gen, disc, batch, batch_size, D_optimizer, lod_in=lod_in, training_set=None, labels=None, wgan_lambda = 10.0, wgan_epsilon = 0.001, wgan_target = 1.0, cond_weight = 1.0,  network_size=net_size)  
+        return gen_loss, disc_loss
 
-        #tf.print(gen_loss)
+    if use_stategy:
+        @tf.function
+        def training_step_tf_fuction_32(dataset, lod_in_value):
+            gen_loss, disc_loss = strategy.run(training_step, args=(next(dataset), lod_in_value))
 
-        return gen_loss
+            gen_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_loss, axis=None)
+            disc_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_loss, axis=None)
 
-    @tf.function
-    def training_step_tf_fuction_32(dataset):
-        lossval = training_step(next(dataset))
-        return lossval
+            return gen_loss, disc_loss
 
-    @tf.function
-    def training_step_tf_fuction_64(dataset):
-        lossval = training_step(next(dataset))
-        return lossval
+        @tf.function
+        def training_step_tf_fuction_64(dataset, lod_in_value):
+            gen_loss, disc_loss = strategy.run(training_step, args=(next(dataset), lod_in_value))
 
-    @tf.function
-    def training_step_tf_fuction_128(dataset):
-        lossval = training_step(next(dataset))
-        return lossval
+            gen_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_loss, axis=None)
+            disc_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_loss, axis=None)
 
-    for epoch in range(n_epochs):
-        print(epoch)
+            return gen_loss, disc_loss
+
+        @tf.function
+        def training_step_tf_fuction_128(dataset, lod_in_value):
+            gen_loss, disc_loss = strategy.run(training_step, args=(next(dataset), lod_in_value))
+
+            gen_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_loss, axis=None)
+            disc_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_loss, axis=None)
+
+            return gen_loss, disc_loss
+
+        @tf.function
+        def training_step_tf_fuction_256(dataset, lod_in_value):
+            gen_loss, disc_loss = strategy.run(training_step, args=(next(dataset), lod_in_value))
+
+            gen_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_loss, axis=None)
+            disc_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_loss, axis=None)
+
+            return gen_loss, disc_loss
+    else:
+        @tf.function
+        def training_step_tf_fuction_32(dataset, lod_in_value):
+            gen_loss, disc_loss = training_step(next(dataset), lod_in_value)
+            return gen_loss, disc_loss
+
+        @tf.function
+        def training_step_tf_fuction_64(dataset, lod_in_value):
+            gen_loss, disc_loss = training_step(next(dataset), lod_in_value)
+            return gen_loss, disc_loss
+
+        @tf.function
+        def training_step_tf_fuction_128(dataset, lod_in_value):
+            gen_loss, disc_loss = training_step(next(dataset), lod_in_value)
+            return gen_loss, disc_loss
+
+        @tf.function
+        def training_step_tf_fuction_256(dataset, lod_in_value):
+            gen_loss, disc_loss = training_step(next(dataset), lod_in_value)
+            return gen_loss, disc_loss
+
+    train_time = time.time()      
+
+    gen_loss_train = []
+    disc_loss_train = []
+
+    # curr_image = 4512000
+    # with strategy.scope():
+    #     #gen.save_weights('generator.h5')
+    #     #gen = networks.named_generator_model(resolution)
+    #     gen.load_weights('saved_models/generator_4512.h5', by_name=True)
+
+    #     #disc.save_weights('discriminator.h5')
+    #     #disc = networks.named_discriminator(resolution)
+    #     disc.load_weights('saved_models/discriminator_4512.h5', by_name=True)
+
+
+    while curr_image < total_kimg * 1000:
         # update model / variables (lr, lod, dataset) if needed 
+        print(curr_image)
+
 
         lod, resolution, G_lrate, D_lrate = TrainingSchedule(
         curr_image,                           
@@ -341,22 +466,48 @@ def train_cycle():
         G_lrate_dict            = G_lrate_dict,       
         D_lrate_dict            = D_lrate_dict)  
 
-        if epoch >= 5:
-            resolution = 64
-            lod = 2
+        lod = lod.item()
+        lod_in_value = tf.constant(lod)
 
         if prev_res != resolution:
             print('Increase Resoltion from %d to %d' % (prev_res, resolution))
+
+            #change dataset
+
             #lod is 6 for 4x4 and 0 for 256x256 (Should be change to match lod obtainned from TrainingSchedule)
             resolution_log2 = int(np.log2(resolution))
             lod_dataset = max_res_log2 - resolution_log2
             #get dataset and new batch size
-            dataset = dataset_list[lod_dataset]
+            if use_stategy:
+                dataset = distributed_dataset[lod_dataset]
+            else: 
+                dataset = dataset_list[lod_dataset]
             dataset_iter = iter(dataset)
             batch_size = int(batch_sizes_list[lod_dataset] / num_replicas)
+            global_batch_size = batch_sizes_list[lod_dataset]
             
+            lod_in_value = tf.constant(lod)
 
-            if prev_res != -1:
+            print(lod_in_value)
+
+            if change_model:
+                net_size = int(resolution)
+                print(net_size)
+            else:
+                net_size = int(resolution * 2**tf.math.floor(lod_in_value))
+                print(net_size)
+
+            #change optmizer
+            if use_stategy:
+                with strategy.scope():
+                    D_optimizer = Adam(learning_rate=G_lrate, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+                    G_optimizer = Adam(learning_rate=D_lrate, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+            else:
+                D_optimizer = Adam(learning_rate=G_lrate, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+                G_optimizer = Adam(learning_rate=D_lrate, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+
+            #change model
+            if prev_res != -1 and change_model:
                 #increase models
                 gen.save_weights('generator.h5')
                 gen = networks.named_generator_model(resolution)
@@ -365,34 +516,164 @@ def train_cycle():
                 disc.save_weights('discriminator.h5')
                 disc = networks.named_discriminator(resolution)
                 disc.load_weights('discriminator.h5', by_name=True)
+            
+            elif prev_res != -1 and not change_model:
+                if use_stategy:
+                    with strategy.scope():
+                        gen.save_weights('generator.h5')
+                        gen = networks.named_generator_model(256, num_replicas = num_replicas)
+                        gen.load_weights('generator.h5', by_name=True)
+
+                        disc.save_weights('discriminator.h5')
+                        disc = networks.named_discriminator(256, num_replicas = num_replicas)
+                        disc.load_weights('discriminator.h5', by_name=True)
 
             #optimizer learning rate (and reset?)
 
             prev_res = resolution
 
+            print('Finished changing resolution')
+
         # Run training ops.
         for repeat in range(minibatch_repeats):
             #print(repeat)
             if resolution == 32:
-                lossval = training_step_tf_fuction_32(dataset_iter)
+                gen_loss, disc_loss = training_step_tf_fuction_32(dataset_iter, lod_in_value)
             elif resolution == 64:
-                lossval = training_step_tf_fuction_64(dataset_iter)
+                gen_loss, disc_loss = training_step_tf_fuction_64(dataset_iter, lod_in_value)
+            elif resolution == 128:
+                gen_loss, disc_loss = training_step_tf_fuction_128(dataset_iter, lod_in_value)
+            elif resolution == 256:
+                gen_loss, disc_loss = training_step_tf_fuction_256(dataset_iter, lod_in_value)
             #print(lossval.numpy())
 
         #Run Test
 
 
-        #get stats and save model
-        # gen.save_weights('generator.h5')
-        # gen = networks.named_generator_model(64)
-        # gen.load_weights('generator.h5', by_name=True)
+        # get stats and save model
+        gen_loss_train.append(gen_loss.numpy())
+        disc_loss_train.append(disc_loss.numpy())
 
-        # print('Loaded Model')
+        if curr_image % (global_batch_size * 100) == 0:
+            print(curr_image)
+            print(time.time() - train_time )
+            print(lod_in_value)
+            # get stats
+            print(gen_loss.numpy())
+            print(disc_loss.numpy())
+            print('\n')
+            train_time = time.time()
+
+        if curr_image % (global_batch_size * 10000) == 0:
+            # save model
+            gen.save_weights('saved_models/generator_'+str(int(curr_image/1000))+'.h5')
+            disc.save_weights('saved_models/discriminator_'+str(int(curr_image/1000))+'.h5')
+            pickle.dump({'gen_loss': gen_loss_train, 'disc_loss': disc_loss_train}, open('losses.pkl', 'wb'))
+            print('Model Saved')
+        
+        curr_image += global_batch_size
+
+    gen.save_weights('generator_Final.h5')
+    disc.save_weights('discriminator_Final.h5')
+    return
+
+def get_image(imgi):
+    filename = 'cond4/'+str(imgi)+'.png'
+    if os.path.isfile(filename):
+        im=Image.open(filename)
+        im.load()
+        im = np.asarray(im, dtype=np.float32 )
+        im=np.transpose(im, (2, 0, 1))
+
+    return im
+
+def generate_image(gen, img, saveloc, fullsize, lod_in=0.0):
+    drange_net              = [-1,1]       # Dynamic range used when feeding image data to the networks.
+    size= int(fullsize / 2)
+    drange_data = [0, fullsize-1]
+
+    grid_reals = np.zeros((1, 3, 256, 256))
+    grid_reals[0] = img
+
+
+    #generate latent with concatenation
+    real1= grid_reals[:,:, :(size),:(size)]
+    real2= grid_reals[:,:, (size):,:(size)]
+    real3= grid_reals[:,:, :(size),(size):]
+    real1=(real1.astype(np.float32)-127.5)/127.5
+    real2=(real2.astype(np.float32)-127.5)/127.5
+    real3=(real3.astype(np.float32)-127.5)/127.5
+    print('real3 shape' + str(real3.shape))
+    latents = np.random.randn(1, 3, 128, 128)
+    left = np.concatenate((real1, real2), axis=2)
+    right = np.concatenate((real3, latents), axis=2)
+    lat_and_cond = np.concatenate((left, right), axis=3)
+
+
+    # Conditional GAN Loss
+    # real1= grid_reals[:,:, :(size),:(size)]
+    # real2= grid_reals[:,:, (size):,:(size)]
+    # real3= grid_reals[:,:, :(size),(size):]
+    # real4= grid_reals[:,:, :(size), :(size)]
+    
+   
+    # #generate fakes
+    # latents = tf.random.normal([1, 3, size, size])
+    # left = tf.concat([real1, real2], axis=2)
+    # right = tf.concat([real3, latents], axis=2)
+    # lat_and_cond = tf.concat([left, right], axis=3)
+
+
+    #generate 128x128 image
+    fake_images_out_small = gen([lat_and_cond, lod_in], training=False)
+    fake_images_out_small = fake_images_out_small.numpy()
+
+
+    #concatenate generated image with real images
+    fake_image_out_right =np.concatenate((real3, fake_images_out_small), axis=2)
+    fake_image_out_left = np.concatenate((real1, real2), axis=2)
+    grid_fakes = np.concatenate((fake_image_out_left, fake_image_out_right), axis=3)
+
+    #grid_fakes = grid_fakes.numpy()
+
+    #print(grid_fakes)
+    grid_fakes = grid_fakes[0]
+
+
+    image = grid_fakes.transpose(1, 2, 0) # CHW -> HWC
+
+    image = adjust_dynamic_range(image, drange_net, drange_data)
+    image = np.rint(image).clip(0, 255).astype(np.uint8)
+    format = 'RGB' if image.ndim == 3 else 'L'
+    image = Image.fromarray(image, format).save(saveloc)
 
     return
 
+def snapshot(dataset_list):
+    lod_dataset = 0
+    dataset = dataset_list[lod_dataset]
+
+    dataset = next(iter(dataset)).numpy()[0]
+
+    print(dataset)
+
+    image = (dataset.transpose(1, 2, 0).astype(np.float32)-127.5)/127.5
+
+    image = adjust_dynamic_range(image, [-1,1], [0, 255])
+    image = np.rint(image).clip(0, 255).astype(np.uint8)
+    format = 'RGB' #if image.ndim == 3 else 'L'
+    image = Image.fromarray(image, format).save('img.png')
+    
+    return
 
 
 if __name__ == "__main__":
-   train_cycle()
-   print('Finished Training')
+    os.environ["CUDA_VISIBLE_DEVICES"]="0"
+    #np.random.seed(1000)
+    #tf.random.set_seed(np.random.randint(1 << 31))
+    train_cycle()
+#    gen = networks.named_generator_model(256)
+#    gen.load_weights('generator_Final.h5', by_name=True)
+#    image = get_image(1)
+#    generate_image(gen, image, 'fakeimg.png', 256, lod_in=0.0)
+    print('Finished Training')
