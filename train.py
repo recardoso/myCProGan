@@ -7,7 +7,7 @@ import glob
 #import config
 #import tfutil
 #import dataset
-import networks
+import networks2
 import loss
 #import misc
 
@@ -316,27 +316,27 @@ def train_cycle():
         num_replicas = strategy.num_replicas_in_sync
         if change_model:
             with strategy.scope():
-                gen = networks.named_generator_model(init_res, num_replicas = num_replicas) #choose resolution
+                gen = networks2.generator(init_res, num_replicas = num_replicas) #choose resolution
                 #plot_model(gen, show_shapes=True, dpi=64)
-                disc = networks.named_discriminator(init_res, num_replicas = num_replicas) #choose resolution
+                disc = networks2.discriminator(init_res, num_replicas = num_replicas) #choose resolution
                 #plot_model(disc, show_shapes=True, dpi=64)
         else:
             with strategy.scope():
-                gen = networks.named_generator_model(256, num_replicas = num_replicas)
-                #gen = networks.named_generator_model(256, num_replicas = num_replicas) #choose resolution
+                gen = networks2.generator(256, num_replicas = num_replicas)
+                #gen = networks2.generator(256, num_replicas = num_replicas) #choose resolution
                 #plot_model(gen, show_shapes=True, dpi=64)
-                disc = networks.named_discriminator(256, num_replicas = num_replicas) #choose resolution
+                disc = networks2.discriminator(256, num_replicas = num_replicas) #choose resolution
                 #plot_model(disc, show_shapes=True, dpi=64)
     else:
         if change_model:
-            gen = networks.named_generator_model(init_res) #choose resolution
+            gen = networks2.generator(init_res) #choose resolution
             #plot_model(gen, show_shapes=True, dpi=64)
-            disc = networks.named_discriminator(init_res) #choose resolution
+            disc = networks2.discriminator(init_res) #choose resolution
             #plot_model(disc, show_shapes=True, dpi=64)
         else:
-            gen = networks.named_generator_model(256) #choose resolution
+            gen = networks2.generator(256) #choose resolution
             #plot_model(gen, show_shapes=True, dpi=64)
-            disc = networks.named_discriminator(256) #choose resolution
+            disc = networks2.discriminator(256) #choose resolution
             #plot_model(disc, show_shapes=True, dpi=64)
 
     #D_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
@@ -510,22 +510,22 @@ def train_cycle():
             if prev_res != -1 and change_model:
                 #increase models
                 gen.save_weights('generator.h5')
-                gen = networks.named_generator_model(resolution)
+                gen = networks2.generator(resolution)
                 gen.load_weights('generator.h5', by_name=True)
 
                 disc.save_weights('discriminator.h5')
-                disc = networks.named_discriminator(resolution)
+                disc = networks2.discriminator(resolution)
                 disc.load_weights('discriminator.h5', by_name=True)
             
             elif prev_res != -1 and not change_model:
                 if use_stategy:
                     with strategy.scope():
                         gen.save_weights('generator.h5')
-                        gen = networks.named_generator_model(256, num_replicas = num_replicas)
+                        gen = networks2.generator(256, num_replicas = num_replicas)
                         gen.load_weights('generator.h5', by_name=True)
 
                         disc.save_weights('discriminator.h5')
-                        disc = networks.named_discriminator(256, num_replicas = num_replicas)
+                        disc = networks2.discriminator(256, num_replicas = num_replicas)
                         disc.load_weights('discriminator.h5', by_name=True)
 
             #optimizer learning rate (and reset?)
@@ -668,7 +668,7 @@ def snapshot(dataset_list):
 
 
 if __name__ == "__main__":
-    os.environ["CUDA_VISIBLE_DEVICES"]="0"
+    #os.environ["CUDA_VISIBLE_DEVICES"]="0"
     #np.random.seed(1000)
     #tf.random.set_seed(np.random.randint(1 << 31))
     train_cycle()

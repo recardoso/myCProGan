@@ -35,7 +35,7 @@ class WeightScaleLayer(tf.keras.layers.Layer):
     def __init__(self, input_shape_value, gain = np.sqrt(2), **kwargs):
         super(WeightScaleLayer, self).__init__(**kwargs)
         self.shape = input_shape_value #[kernel, kernel, x.shape[1]]
-        self.fan_in = np.prod(self.shape)
+        self.fan_in = tf.cast(np.prod(self.shape), tf.float32)
         #self.wscale = gain / np.sqrt(self.fan_in)
         self.wscale = gain * tf.math.rsqrt(self.fan_in)
       
@@ -50,10 +50,13 @@ class Bias(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         bias_init = tf.zeros_initializer()
-        self.bias = tf.Variable(initial_value = bias_init(shape=(input_shape[-1],), dtype='float32'), trainable=True)  
+        self.bias = tf.Variable(initial_value = bias_init(shape=(input_shape[1],), dtype='float32'), trainable=True)  
 
     def call(self, inputs, **kwargs):
-        return inputs + self.bias
+        if len(inputs.shape) == 2:
+            return inputs + self.bias
+        else:
+            return inputs + tf.reshape(self.bias, [1, -1, 1, 1])
     
 
 class Lerp_clip_layer(tf.keras.layers.Add):
@@ -101,8 +104,9 @@ class Pixel_norm_layer(tf.keras.layers.Layer):
 def conv2dwscale(x, filters, kernel_size, gain, use_pixelnorm=False, activation=False, strides=(1,1), name=''):
     init = tf.keras.initializers.RandomNormal(mean=0., stddev=1.) #change the stddev to 1
     #[kernel, kernel, x.shape[1]]
-    x = WeightScaleLayer(input_shape_value=(kernel_size[0], kernel_size[1], x.shape[1]), gain=gain)(x)
+    #x = WeightScaleLayer(input_shape_value=(kernel_size[0], kernel_size[1], x.shape[1]), gain=gain)(x)
     x = Conv2D(filters, kernel_size, strides=strides, use_bias=False, padding="same", kernel_initializer=init, dtype='float32', data_format='channels_first', name=name)(x)
+    x = WeightScaleLayer(input_shape_value=(kernel_size[0], kernel_size[1], x.shape[1]), gain=gain)(x)
     bias_name = name + '_bias' 
     x = Bias(input_shape=x.shape, name=bias_name)(x)
     if activation:
@@ -111,26 +115,33 @@ def conv2dwscale(x, filters, kernel_size, gain, use_pixelnorm=False, activation=
         x = Pixel_norm_layer(epsilon=1e-8)(x)
     return x 
 
-def densewscale(x, filters, gain, use_pixelnorm=False, activation=False, name=''):
+def densewscale(x, filters, gain, use_pixelnorm=False, activation=False, name='', extra_bias=False):
     init = tf.keras.initializers.RandomNormal(mean=0., stddev=1.) #change the stddev to 1
-    #if len(x.shape) > 2: #is this necessary or the dense layer already does this?
-    #    x = tf.reshape(x, [-1, np.prod([d.value for d in x.shape[1:]])])
+    if len(x.shape) > 2: #is this necessary or the dense layer already does this?
+        x = tf.reshape(x, [-1, np.prod(x.shape[1:])])
     #[x.shape[1].value, fmaps]
-    x = WeightScaleLayer(input_shape_value=(x.shape[1]), gain=gain)(x)
+    #x = WeightScaleLayer(input_shape_value=(x.shape[1]), gain=gain)(x)
     x = Dense(filters, use_bias=False, kernel_initializer=init, dtype='float32', name=name)(x)
+    x = WeightScaleLayer(input_shape_value=(x.shape[1]), gain=gain)(x)
     bias_name = name + '_bias'
-    x = Bias(input_shape=x.shape, name=bias_name)(x)
+    bias = Bias(input_shape=x.shape, name=bias_name)
+    x = bias(x)
     if activation:
         x = LeakyReLU(0.2)(x) #.2 used in the oroginal function
     if use_pixelnorm:
+        #x = PN(act(apply_bias(x)))
+        if extra_bias:
+            x = bias(x)
+            x = LeakyReLU(0.2)(x)
         x = Pixel_norm_layer(epsilon=1e-8)(x)
     return x 
 
 def conv2d_downscale2dwscale(x, filters, kernel_size, gain, use_pixelnorm=False, activation=False, strides=(1,1), name=''):
     init = tf.keras.initializers.RandomNormal(mean=0., stddev=1.) #change the stddev to 1
     #[kernel, kernel, x.shape[1]]
-    x = WeightScaleLayer(input_shape_value=(kernel_size[0], kernel_size[1], x.shape[1]), gain=gain)(x)
+    #x = WeightScaleLayer(input_shape_value=(kernel_size[0], kernel_size[1], x.shape[1]), gain=gain)(x)
     x = Conv2D(filters, kernel_size, strides=strides, use_bias=False, padding="same", kernel_initializer=init, dtype='float32', data_format='channels_first', name=name)(x)
+    x = WeightScaleLayer(input_shape_value=(kernel_size[0], kernel_size[1], x.shape[1]), gain=gain)(x)
     x = AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding='valid', data_format='channels_first')(x) #is this in the correct position?
     bias_name = name + '_bias' 
     x = Bias(input_shape=x.shape, name=bias_name)(x)
@@ -143,9 +154,10 @@ def conv2d_downscale2dwscale(x, filters, kernel_size, gain, use_pixelnorm=False,
 def upscale_conv2dwscale(x, filters, kernel_size, gain, use_pixelnorm=False, activation=False, strides=(1,1), name=''):
     init = tf.keras.initializers.RandomNormal(mean=0., stddev=1.) #change the stddev to 1
     #[kernel, kernel, x.shape[1]]
-    x = WeightScaleLayer(input_shape_value=(kernel_size[0], kernel_size[1], x.shape[1]), gain=gain)(x)
+    #x = WeightScaleLayer(input_shape_value=(kernel_size[0], kernel_size[1], x.shape[1]), gain=gain)(x)
     x = UpSampling2D(size=(2, 2), data_format='channels_first', interpolation='nearest')(x) #is this in the correct position?
     x = Conv2D(filters, kernel_size, strides=strides, use_bias=False, padding="same", kernel_initializer=init, dtype='float32', data_format='channels_first', name=name)(x)
+    x = WeightScaleLayer(input_shape_value=(kernel_size[0], kernel_size[1], x.shape[1]), gain=gain)(x)
     bias_name = name + '_bias' 
     x = Bias(input_shape=x.shape, name=bias_name)(x)
     if activation:
@@ -174,12 +186,7 @@ def encoder(x, resolution_log2, gain=np.sqrt(2)):
     name ='Conv_down4'
     x = conv2d_downscale2dwscale(x, filters=32, kernel_size=(3,3), gain=gain, use_pixelnorm=False, activation=True, strides=(1,1), name=name)
     name = 'Dense0up'
-    x = densewscale(x, 2048, gain=gain, use_pixelnorm=False, activation=True, name=name)
-    bias_name = name + '_bias_PN'
-    #x = PN(act(apply_bias(x)))
-    x = Bias(input_shape=x.shape, name=bias_name)(x)
-    x = LeakyReLU(0.2)(x)
-    x = Pixel_norm_layer(epsilon=1e-8)(x)
+    x = densewscale(x, 2048, gain=gain, use_pixelnorm=True, activation=True, name=name, extra_bias=True)
     name = 'Dense1up'
     x = densewscale(x, 2048, gain=1, use_pixelnorm=False, activation=True, name=name)
     return x, y
@@ -231,11 +238,11 @@ def discriminator_block(x,res,resolution_log2,gain=np.sqrt(2),mbstd_group_size =
         x = conv2d_downscale2dwscale(x, filters=nf(res-2, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=False, activation=True, strides=(1,1), name=name)
     else: # 4x4
         if mbstd_group_size > 1:
-            Minibatch_stddev_layer(mbstd_group_size)(x)
+            x = Minibatch_stddev_layer(mbstd_group_size)(x)
         name = scope_name + '/Conv0'
         x = conv2dwscale(x, filters=nf(res-1, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=False, activation=True, strides=(1,1), name=name)
         name = scope_name + '/Dense0'
-        x = densewscale(x, filters=nf(res-2, fmap_base, fmap_decay, fmap_max), use_pixelnorm=False, activation=True, name=name)
+        x = densewscale(x, filters=nf(res-2, fmap_base, fmap_decay, fmap_max), gain=gain, use_pixelnorm=False, activation=True, name=name)
 
         name = scope_name + '/Dense1'
         x = densewscale(x, filters=1+label_size, gain=1, use_pixelnorm=False, activation=True, name=name)     

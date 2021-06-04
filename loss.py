@@ -7,7 +7,7 @@
 
 import numpy as np
 import tensorflow as tf
-import networks
+import networks2
 #import config
 
 #import tfutil
@@ -331,7 +331,7 @@ def Discriminator_loss(G, D, reals, minibatch_size, opt, lod_in=0.0, training_se
     #tf.print('Discrimintator Loss')
     #tf.print(loss)
 
-    print(grad_total_tape.watched_variables())
+    #print(grad_total_tape.watched_variables())
 
     gradients =  grad_total_tape.gradient(d_loss, D.trainable_variables) # model.trainable_variables or  model.trainable_weights
 

@@ -50,7 +50,7 @@ def generator(resolution=256,num_channels=3,num_replicas=1): #confirm params and
         x = generator_block(x, res, y, resolution_log2)
         img = torgb(x, res)
         images_out = UpSampling2D(size=(2, 2), data_format='channels_first', interpolation='nearest')(images_out)
-        images_out = Lerp_clip_layer()(img, images_out, lod_in - lod)
+        images_out = Lerp_clip_layer()([img, images_out, lod_in - lod])
         #lerp_clip(img, images_out, lod_in - lod)
 
     assert images_out.dtype == tf.as_dtype(dtype)
@@ -69,17 +69,21 @@ def discriminator(resolution=256, num_channels=3, label_size = 0, mbstd_group_si
     lod_in= Input(shape=(), batch_size=num_replicas, name='lod_in')
     lod_in = tf.cast(lod_in, tf.float32)
 
+    fmap_base           = 8192         # Overall multiplier for the number of feature maps.
+    fmap_decay          = 1.0          # log2 feature map reduction when doubling the resolution.
+    fmap_max            = 512          # Maximum number of feature maps in any layer.
+
     #TODO: Final 2 dense layers too sharp: add one or more dense layers in the middle
     dtype               = 'float32'
 
     img = images_in
-    x = fromrgb(img, resolution_log2)
+    x = fromrgb(img, resolution_log2, filters=nf(resolution_log2-1, fmap_base, fmap_decay, fmap_max))
     for res in range(resolution_log2, 2, -1):
         lod = resolution_log2 - res
         x = discriminator_block(x, res, resolution_log2, mbstd_group_size = mbstd_group_size)
         img = AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding='valid', data_format='channels_first')(img)
-        y = fromrgb(img, res - 1)
-        x = Lerp_clip_layer()(x, y, lod_in - lod)
+        y = fromrgb(img, res - 1, filters=nf(res - 1-1, fmap_base, fmap_decay, fmap_max))
+        x = Lerp_clip_layer()([x, y, lod_in - lod])
     combo_out = discriminator_block(x, 2, resolution_log2, mbstd_group_size = mbstd_group_size)
 
     assert combo_out.dtype == tf.as_dtype(dtype)
