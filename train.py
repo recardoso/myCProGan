@@ -664,7 +664,7 @@ def snapshot(dataset_list):
     format = 'RGB' #if image.ndim == 3 else 'L'
     image = Image.fromarray(image, format).save('img.png')
     
-    return
+    return dataset
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 
-import networks
+import networks2
 import tensorflow as tf
 from PIL import Image
 
@@ -16,6 +16,7 @@ def adjust_dynamic_range(data, drange_in, drange_out):
 
 def get_image(imgi):
     filename = 'cond4/'+str(imgi)+'.png'
+    filename = 'img.png'
     if os.path.isfile(filename):
         im=Image.open(filename)
         im.load()
@@ -114,12 +115,54 @@ def plot_loss():
     ax.plot(t, disc_loss)
     fig.savefig("losses.png")
 
+def snapshot(dataset_list):
+    lod_dataset = 0
+    dataset = dataset_list[lod_dataset]
+
+    dataset = next(iter(dataset)).numpy()[0]
+
+    print(dataset)
+
+    image = (dataset.transpose(1, 2, 0).astype(np.float32)-127.5)/127.5
+
+    image = adjust_dynamic_range(image, [-1,1], [0, 255])
+    image = np.rint(image).clip(0, 255).astype(np.uint8)
+    format = 'RGB' #if image.ndim == 3 else 'L'
+    image = Image.fromarray(image, format).save('img.png')
+    
+    return dataset
+
+def calculate_lod(cur_nimg,dataset_res_log2,lod_initial_resolution=32,lod_training_kimg=300,lod_transition_kimg=1500):
+    # Training phase.
+    kimg = cur_nimg / 1000.0
+    phase_dur = lod_training_kimg + lod_transition_kimg
+    phase_idx = int(np.floor(kimg / phase_dur)) if phase_dur > 0 else 0
+    phase_kimg = kimg - phase_idx * phase_dur
+
+    # Level-of-detail and resolution.
+    lod = dataset_res_log2
+    lod -= np.floor(np.log2(lod_initial_resolution))
+    lod -= phase_idx
+    if lod_transition_kimg > 0:
+        lod -= max(phase_kimg - lod_training_kimg, 0.0) / lod_transition_kimg
+    lod = max(lod, 0.0)
+
+    lod = np.float32(lod)
+
+    lod = tf.cast(lod, tf.float32)
+
+    return lod 
 
 
 if __name__ == "__main__":
     plot_loss()
         
-    gen = networks.named_generator_model(256)
-    gen.load_weights('generator_Final.h5', by_name=True)
+    gen = networks2.generator(256)
+    step = 640
+    gen.load_weights('./saved_models/generator_'+str(step)+'.h5', by_name=True)
     image = get_image(1)
-    generate_image(gen, image, 'fakeimg.png', 256, lod_in=0.0)
+    res = 256
+    res = int(np.log2(res))
+    lod_in = calculate_lod(step*1000,res)
+    print(lod_in)
+    generate_image(gen, image, 'fakeimg.png', 256, lod_in=lod_in)
