@@ -14,10 +14,13 @@ import loss
 from tensorflow.keras.optimizers import Adam
 
 from tensorflow.keras.utils import to_categorical, plot_model
+import tensorflow_datasets as tfds
 
 from PIL import Image
 
 import pickle
+import optuna
+
 
 
 
@@ -62,6 +65,12 @@ def process_reals(x, lod, mirror_augment, drange_data, drange_net):
     #tf.print(tf.shape(x))
     return x
 
+def process_reals_cvae(x, drange_data, drange_net):
+    x = tf.cast(x, tf.float32)
+    #x = adjust_dynamic_range(x, drange_data, drange_net)
+
+    return x
+
 #----------------------------------------------------------------------------
 # Dataset Reading and Processing
 
@@ -72,6 +81,18 @@ def parse_tfrecord_tf(record):
     #data = tf.io.decode_raw(features['data'], tf.uint8)
     data = tf.io.decode_raw(features['data'], tf.uint8)
     return tf.reshape(data, features['shape'])
+
+def parse_tfrecord_tf_eurosat(record):
+    features = tf.io.parse_single_example(record, features={
+        'image': tf.io.FixedLenFeature([], tf.string)})
+    #data = tf.io.decode_raw(features['data'], tf.uint8)
+    print(features)
+    data = tf.io.decode_raw(features['image'], tf.uint8)
+    print(data)
+    shape = (64, 64, 3)
+    data = tf.reshape(data, shape)
+    data = tf.transpose(data, [1,2,0])
+    return data
 
 def parse_tfrecord_np(record):
     ex = tf.train.Example()
@@ -649,31 +670,407 @@ def generate_image(gen, img, saveloc, fullsize, lod_in=0.0):
 
     return
 
-def snapshot(dataset_list):
-    lod_dataset = 0
-    dataset = dataset_list[lod_dataset]
+def snapshot(n_images=1, save=False):
+    # tfrecord_dir = '/home/renato/dataset/satimages'
+    # tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir, '*.tfrecords')))
+    # minibatch_base = 32
+    # minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 64, 64: 64, 128: 32}
+    # max_minibatch_per_gpu = {256: 16, 512: 8, 1024: 8}
+    # dataset_list, batch_sizes_list = get_dataset(tfr_files, num_gpus=1, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu)
+    # lod_dataset = 0
+    # dataset = dataset_list[lod_dataset]
+    (train, val, test) = tfds.load("eurosat/rgb", split=["train[:100%]", "train[80%:90%]", "train[90%:]"])
 
-    dataset = next(iter(dataset)).numpy()[0]
+    def prepare_training_data(datapoint):
+        input_image = datapoint["image"]
+        data = tf.transpose(input_image, [2,0,1])
+        return data
 
-    print(dataset)
+    dataset = train.map(prepare_training_data, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    dataset_iter = iter(dataset)
 
-    image = (dataset.transpose(1, 2, 0).astype(np.float32)-127.5)/127.5
+    images = []
 
-    image = adjust_dynamic_range(image, [-1,1], [0, 255])
-    image = np.rint(image).clip(0, 255).astype(np.uint8)
-    format = 'RGB' #if image.ndim == 3 else 'L'
-    image = Image.fromarray(image, format).save('img.png')
+    # for el in dataset.take(n_images):
+    #     images.append(el.numpy()[0])
+    #     #print(repr(el))
+
+
+    for _ in range(n_images):
+        dataset_el = next(dataset_iter).numpy()#[0]
+        images.append(dataset_el)
+
+    #print(dataset)
+
+    #image = (dataset.transpose(1, 2, 0).astype(np.float32)-127.5)/127.5
+
+    #image = adjust_dynamic_range(image, [-1,1], [0, 255])
+    #image = np.rint(image).clip(0, 255).astype(np.uint8)
+    if save:
+        format = 'RGB' #if image.ndim == 3 else 'L'
+        image = Image.fromarray(dataset, format).save('img.png')
     
-    return dataset
+    return images
+
+def encoder_train_cycle(lr=0.0005):
+    #initialization of variables
+    #BETA_1 = 0.0
+    #BETA_2 = 0.99
+    EPSILON = 1e-8
+    LR = lr
+
+    num_replicas = 1
+    
+    use_gpus = True
+    use_multi_gpus = False
+ 
+
+    #training repeats
+    n_epochs = 500
+
+    #initialization of paths
+    #tfrecord_dir = '/home/renato/dataset'
+    tfrecord_dir = '/home/renato/dataset/satimages'
+
+    start_init = time.time()
+    f = [0.9, 0.1] # train, test fractions might be necessary
+
+
+
+    #start strategy
+    if use_gpus:
+        strategy = tf.distribute.MirroredStrategy()
+        use_stategy = True
+    elif use_multi_gpus:
+        strategy = tf.distribute.MirroredStrategy()
+        use_stategy = True
+    #elif use_tpu:
+    else:
+        use_stategy = False
+
+
+    #initialize models and optimizer
+    if use_stategy:
+        print ('Number of devices: {}'.format(strategy.num_replicas_in_sync))
+        num_replicas = strategy.num_replicas_in_sync
+        global_batch_size = 32 * num_replicas
+        print('Global batch size: ' + str(global_batch_size))
+        with strategy.scope():
+            cvae = networks2.CVAE(resolution=128, base_filter=8,latent_dim=256)
+    else:
+        cvae = networks2.CVAE(resolution=256, base_filter=8,latent_dim=256)
+
+    #D_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+    #G_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+
+    opt = Adam(learning_rate=LR, epsilon=EPSILON)
+
+    #load data
+    DATA_DIR = '/home/renato/dataset/eurosatimages'
+    #dset= tfds.load('eurosat/rgb',data_dir=DATA_DIR)
+    #tfr_file = sorted(glob.glob(os.path.join(tfrecord_dir, '*r08.tfrecords')))[0]
+
+    (train, val, test) = tfds.load("eurosat/rgb", split=["train[:100%]", "train[80%:90%]", "train[90%:]"])
+
+    def prepare_training_data(datapoint):
+        input_image = datapoint["image"]
+        data = tf.transpose(input_image, [2,0,1])
+        return data
+
+    dset = train.map(prepare_training_data, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+
+    #count = sum(1 for _ in tf.data.TFRecordDataset(tfr_file))
+    #print(count)
+
+    #shuffle_mb = 10350     # Shuffle data within specified window (megabytes), 0 = disable shuffling.
+    shuffle_mb = 27350 
+
+    #get dataset
+    
+    
+    #use parse function
+    #dset = dset.map(parse_tfrecord_tf, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+    #shuffle
+    if shuffle_mb > 0:
+        dset = dset.shuffle(shuffle_mb)
+    #repeat    
+    dset = dset.repeat()
+    #prefetch
+    dset = dset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+    #batch
+    print('Global batch size: ' + str(global_batch_size))
+    dset = dset.batch(global_batch_size)
+
+    if use_stategy:
+        dset = strategy.experimental_distribute_dataset(dset)
+        
+    dataset_iter = iter(dset)
+
+    print('Dataset Read')
+
+    
+    dataset_size = 27350 
+    batch_repeats = int(dataset_size / global_batch_size)
+
+    print('N_batches = ' + str(batch_repeats))
+
+    #do any necessary data processing
+
+    # Start training
+    epoch_start = time.time()
+
+    #setup image grid
+    gw, gh, reals, fakes, grid = setup_image_grid([3,64,64],  m_size = '1080p')
+
+    def training_step(batch):
+        mirror_augment = False
+        drange_net = [0,1]
+        drange_data = [0, 255]
+
+        batch = process_reals_cvae(batch, drange_data, drange_net)
+        #return batch
+
+        reconstruction_loss, kl_loss = loss.wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt)
+
+
+        return  reconstruction_loss, kl_loss
+
+    if use_stategy:
+        @tf.function
+        def training_step_tf_fuction(dataset):
+            reconstruction_loss, kl_loss = strategy.run(training_step, args=(next(dataset),))
+
+            reconstruction_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, reconstruction_loss, axis=None)
+            kl_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, kl_loss, axis=None)
+
+            return reconstruction_loss, kl_loss
+    else:
+        @tf.function
+        def training_step_tf_fuction(dataset):
+            reconstruction_loss, kl_loss = training_step(next(dataset),)
+            return reconstruction_loss, kl_loss
+
+        
+    train_time = time.time()      
+
+    reconstruction_loss_train = []
+    kl_loss_train = []
+
+    for epoch in range(n_epochs):
+        print('Epoch: ' + str(epoch))
+
+        train_time = time.time() 
+
+        # Run training ops.
+        for _ in range(batch_repeats):
+            reconstruction_loss, kl_loss = training_step_tf_fuction(dataset_iter)
+
+            #Run Test
+
+            reconstruction_loss_train.append(reconstruction_loss.numpy())
+            kl_loss_train.append(kl_loss.numpy())
+
+        
+        # print(time.time() - train_time )
+        # print('Reconstruction Loss ' + str(reconstruction_loss.numpy()))
+        # print('Kl Loss ' + str(kl_loss.numpy()))
+
+        # save model
+        if epoch % 10 == 0:
+            cvae.save_weights('saved_models/vae/cvae_'+str(int(epoch))+'.h5')
+            grid = construct_grid_to_save(gw, gh, reals, fakes, grid, model=cvae, step=epoch)
+            save_grid(gw, gh,grid, step=epoch)
+            # print('Model Saved')
+        pickle.dump({'reconstruction_loss': reconstruction_loss_train, 'kl_loss': kl_loss_train}, open('saved_models/vae/losses_'+str(lr)+'.pkl', 'wb'))
+        
+
+    cvae.save_weights('saved_models/vae/cvae_Final.h5')
+
+    total_loss = reconstruction_loss + kl_loss
+
+    return cvae
+
+def generate_decoded_image(model = None):
+    drange_net  = [0,1]       # Dynamic range used when feeding image data to the networks.
+    drange_data = [0, 256-1]
+
+    a = np.zeros((1, 3, 256, 256))
+    size = 128
+    a4= a[:,:, :(size), :(size)]
+    imgi = 1
+
+    filename = 'cond4/'+str(imgi)+'.png'
+    #filename = 'img.png'
+    if os.path.isfile(filename):
+        im=Image.open(filename)
+        im.load()
+        im = np.asarray(im, dtype=np.float32 )
+        im= np.transpose(im, (2, 0, 1))
+
+    batch = np.zeros((1, 3, 256, 256))
+    batch[0] = im
+    
+
+    batch1= batch[:,:, :(size),:(size)]
+    batch2= batch[:,:, (size):,:(size)]
+    batch3= batch[:,:, :(size),(size):]
+    batch4= batch[:,:, :(size), :(size)]
+
+    # batch1=(batch1.astype(np.float32))/255
+    # batch2=(batch2.astype(np.float32))/255
+    # batch3=(batch3.astype(np.float32))/255
+
+    #batchleft = tf.concat([batch1, batch2], axis=3)
+    #batchall3 = tf.concat([batchleft, batch3], axis=3)
+
+    if model != None:
+        cvae = model
+    else:
+        cvae = networks2.CVAE(resolution=256, base_filter=8, latent_dim=256)
+        cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
+        cvae.load_weights('saved_models/vae/cvae_Final.h5')
+    mean, logvar = cvae.encode(batch1)
+    z = cvae.reparameterize(mean, logvar)
+    predictions = cvae.decode(z)
+    predictions = predictions.numpy()
+
+    #predictionsleft = predictions[:,:, :(size), :(size)]
+    #predictionsmiddle = predictions[:,:, :(size), (size):2*(size)]
+    #predictionsright = predictions[:,:, :(size), 2*(size):3*(size)]
+
+    #fake_image_out_right =np.concatenate((predictionsright, a4), axis=2)
+    #fake_image_out_left = np.concatenate((predictionsleft, predictionsmiddle), axis=2)
+    #grid_fakes = np.concatenate((fake_image_out_left, fake_image_out_right), axis=3)
+
+    grid_fakes = predictions[0]
+
+    image = grid_fakes.transpose(1, 2, 0) # CHW -> HWC
+
+    #image = adjust_dynamic_range(image, drange_net, drange_data)
+    image = np.rint(image).clip(0, 255).astype(np.uint8)
+    format = 'RGB' if image.ndim == 3 else 'L'
+    image = Image.fromarray(image, format).save('saved_models/vae/decodedimg.png')
+
+    return
+    
+#optuna optimization    
+def objective(trial):
+    lr = trial.suggest_float("learning_rate_init", 1e-5, 1e-3, log=True)
+
+    loss = encoder_train_cycle(lr)
+
+    return loss
+
+
+def setup_image_grid(dataset_shape, m_size= '1080p'):
+
+    # Select size
+    gw = 1; gh = 1
+    if m_size == '1080p':
+        gw = np.clip(1920 // dataset_shape[2], 3, 32)
+        gw = gw - (gw % 2)
+        gh = np.clip(1080 // dataset_shape[1], 2, 32)
+    if m_size == '4k':
+        gw = np.clip(3840 // dataset_shape[2], 7, 32)
+        gw = gw - (gw % 2)
+        gh = np.clip(2160 // dataset_shape[1], 4, 32)
+
+    size = dataset_shape[2]
+
+    images = snapshot(n_images=int((gw / 2)) * gh, save=False)
+
+    # Fill in reals and labels.
+    reals = np.zeros([int((gw / 2) * gh)] + dataset_shape, dtype=np.float32)
+    fakes = np.zeros([int((gw / 2) * gh)] + dataset_shape, dtype=np.float32)
+    grid = np.zeros([gw * gh] + dataset_shape, dtype=np.float32)
+    for idx in range(gw * gh):
+        x = idx % gw; y = idx // gw
+        if idx % 2 == 0:
+            real = images[idx//2]
+            grid[idx] = real[:, :(size),:(size)]
+            reals[int(idx // 2)] = real[:, :(size),:(size)]
+        if idx % 2 == 1:
+            grid[idx] = fakes[0]
+
+    # Generate latents.
+    return gw, gh, reals, fakes, grid
+
+def construct_grid_to_save(gw, gh, reals, fakes, grid, model=None, step=0):
+    size=64
+    if model != None:
+        cvae = model
+    else:
+        cvae = networks2.CVAE(resolution=256, base_filter=8, latent_dim=256)
+        cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
+        cvae.load_weights('saved_models/vae/cvae_Final.h5')
+    for idx in range(gw * gh):
+        x = idx % gw; y = idx // gw
+        if idx % 2 == 0:
+            continue
+        if idx % 2 == 1:
+            im= reals[idx // 2]
+            #im= im[:,:, :(size),:(size)]
+            #im= np.transpose(im, (2, 0, 1))
+
+            batch = np.zeros((1, 3, size, size))
+            batch[0] = im
+            #batch = batch[:,:, :(size),:(size)]
+
+            mean, logvar = cvae.encode(batch)
+            z = cvae.reparameterize(mean, logvar)
+            predictions = cvae.decode(z)
+            predictions = predictions.numpy()
+
+            grid_fakes = predictions[0]
+
+            grid[idx] = grid_fakes#.transpose(1, 2, 0) # CHW -> HWC
+
+        #image = adjust_dynamic_range(image, drange_net, drange_data)
+
+    grid_to_save = []
+
+    for el in grid:
+        #gridi = el.transpose(1, 2, 0) 
+        grid_to_save.append(el)
+
+    return grid_to_save
+
+def save_grid(gw, gh,grid,dataset_shape=None,step=0):
+    num, img_w, img_h = len(grid), grid[0].shape[2], grid[0].shape[1]
+    print(num, img_w, img_h)
+
+
+    save_grid = np.zeros([grid[0].shape[0]] + [gh * img_h, gw * img_w], dtype=np.float32)
+    for idx in range(num):
+        x = (idx % gw) * img_w
+        y = (idx // gw) * img_h
+        save_grid[..., y : y + img_h, x : x + img_w] = grid[idx]
+
+    image = save_grid.transpose(1, 2, 0) 
+    image = np.rint(image).clip(0, 255).astype(np.uint8)
+    format = 'RGB'
+    image = Image.fromarray(image, format).save('saved_models/vae/snapshots/grid_'+str(step)+'.png')
+
+    return save_grid
+
 
 
 if __name__ == "__main__":
     #os.environ["CUDA_VISIBLE_DEVICES"]="0"
     #np.random.seed(1000)
     #tf.random.set_seed(np.random.randint(1 << 31))
-    train_cycle()
+    #train_cycle()
 #    gen = networks.named_generator_model(256)
 #    gen.load_weights('generator_Final.h5', by_name=True)
 #    image = get_image(1)
 #    generate_image(gen, image, 'fakeimg.png', 256, lod_in=0.0)
+    model = encoder_train_cycle(lr=8.5e-5)
+    generate_decoded_image(model)
+    #study = optuna.create_study()
+    #study.optimize(objective, n_trials=100)
+    #gw, gh, reals, fakes, grid = setup_image_grid([3,128,128],  m_size = '1080p')
+    #grid = construct_grid_to_save(gw, gh, reals, fakes, grid, model=None, step=0)
+    #save_grid(gw, gh,grid)
     print('Finished Training')

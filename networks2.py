@@ -93,3 +93,125 @@ def discriminator(resolution=256, num_channels=3, label_size = 0, mbstd_group_si
     Model(inputs=[images_in, lod_in], outputs=[scores_out]).summary()
     
     return Model(inputs=[images_in, lod_in], outputs=[scores_out])
+
+def Variational_encoder(resolution=256,num_channels=3,latent_dim=128,kernel_size=3,base_filter=32):
+    #variational encoder to encode the 3 images from the original image
+    #dshape=( num_channels, int(resolution/2), int(resolution/2*3))
+    dshape=( num_channels, int(resolution/2), int(resolution/2))
+    images_in = Input(shape=dshape)
+
+    resolution_log2 = int(np.log2(resolution))
+
+    x = images_in
+
+    #some conv2d for the rgb convertion?
+    x = Conv2D(filters=3, kernel_size=3, strides=(1, 1),  padding='same', data_format='channels_first')(x)
+
+    for n_layer in range(0,resolution_log2-4):
+        #if base_filter*2**n_layer > 128:
+            #filters = 128
+        #else:
+        filters = base_filter*2**n_layer
+        x = Conv2D(filters=filters, kernel_size=kernel_size, strides=(2, 2), padding='same', data_format='channels_first')(x)
+        x = BatchNormalization(axis=1)(x)
+        x = LeakyReLU(0.2)(x)
+    x = Flatten()(x)
+    # No activation
+    #one for mean and another for logvar
+    mean = Dense(latent_dim)(x)
+    logvar = Dense(latent_dim)(x)
+
+    mean = tf.identity(mean, name='encoded_mean')
+    logvar = tf.identity(logvar, name='encoded_logvar')
+
+    Model(inputs=[images_in], outputs=[mean, logvar]).summary()
+    
+    return Model(inputs=[images_in], outputs=[mean, logvar])
+
+def Variational_decoder(resolution=256,num_channels=3,latent_dim=128,kernel_size=3,base_filter=32):
+    latent_in = Input(shape=(latent_dim))
+    resolution_log2 = int(np.log2(resolution))
+
+    base_units = base_filter*2**(resolution_log2-4-1)
+
+    #values 2 and 6 are in accordance with the concatenated images 
+    # 4 corresponds to 256
+    # 2 corresponds to 128
+    # 6 corresponds to 384
+
+    # x = Dense(units=base_units*4*12)(latent_in)
+    # x = Reshape(target_shape=(base_units, 4, 12))(x)
+
+    x = Dense(units=base_units*8*8)(latent_in)
+    x = Reshape(target_shape=(base_units, 8, 8))(x)
+
+    for n_layer in range(resolution_log2-4-1,-1,-1):
+        #if base_filter*2**n_layer > 128:
+        #    filters = 128
+        #else:
+        filters = base_filter*2**n_layer
+        x = Conv2DTranspose(filters=filters, kernel_size=kernel_size, strides=2, padding='same', data_format='channels_first')(x)
+        x = BatchNormalization(axis=1)(x)
+        x = LeakyReLU(0.2)(x)
+    # No activation
+
+    #to RGB
+    #x = Conv2DTranspose(filters=3, kernel_size=1, strides=1,data_format='channels_first',activation='sigmoid')(x)
+    x = Conv2D(filters=3, kernel_size=3, strides=1,data_format='channels_first',padding='same')(x)
+
+    decoded_image = tf.identity(x, name='decoded_image')
+
+    Model(inputs=[latent_in], outputs=[decoded_image]).summary()
+    
+    return Model(inputs=[latent_in], outputs=[decoded_image])
+
+class CVAE(tf.keras.Model):
+    """Convolutional variational autoencoder."""
+
+    def __init__(self, resolution=256, num_channels=3, latent_dim=128,kernel_size=3,base_filter=32):
+        super(CVAE, self).__init__()
+        self.latent_dim = latent_dim
+
+        self.encoder = Variational_encoder(resolution=resolution,num_channels=num_channels,latent_dim=self.latent_dim,kernel_size=kernel_size,base_filter=base_filter)
+
+        self.decoder = Variational_decoder(resolution=resolution,num_channels=num_channels,latent_dim=self.latent_dim,kernel_size=kernel_size,base_filter=base_filter)
+
+
+    def encode(self, x):
+        mean, logvar = self.encoder(x, training=True)
+        return mean, logvar
+
+    #calculate z
+    def reparameterize(self, mean, logvar):
+        batch = tf.shape(mean)[0]
+        dim = tf.shape(mean)[1]
+        eps = tf.random.normal(shape=(batch, dim))
+        return eps * tf.exp(logvar * .5) + mean
+
+    def decode(self, z, apply_sigmoid=False):
+        logits = self.decoder(z, training=True)
+        if apply_sigmoid:
+            probs = tf.sigmoid(logits)
+            return probs
+        return logits
+
+    #eps should be z?
+    @tf.function
+    def sample(self,eps=None,latent_dim=128):
+        if eps is None:
+            eps = tf.random.normal(shape=(100, latent_dim))
+        return self.decode(eps,self.decoder, apply_sigmoid=True)
+
+
+if __name__ == "__main__":
+    a = np.zeros((1, 3, 256, 256))
+    size = 128
+    a1= a[:,:, :(size),:(size)]
+    a2= a[:,:, (size):,:(size)]
+    a3= a[:,:, :(size),(size):]
+    a4= a[:,:, :(size), :(size)]
+    aleft = tf.concat([a1, a2], axis=3)
+    aall3 = tf.concat([aleft, a3], axis=3)
+    print(tf.shape(aall3))
+    Variational_encoder(resolution=256, base_filter=8)
+    Variational_decoder(resolution=256, base_filter=8)

@@ -446,3 +446,150 @@ def original_Discriminator_loss(G, D, reals, minibatch_size, opt, lod_in=0.0, tr
 
 
     return loss
+
+def log_normal_pdf(sample, mean, logvar, raxis=1):
+    log2pi = tf.math.log(2. * np.pi)
+    return tf.reduce_sum(
+        -.5 * ((sample - mean) ** 2. * tf.exp(-logvar) + logvar + log2pi),
+        axis=raxis)
+
+
+def variationa_auto_encoder_loss(cvae, batch, global_batch_size, opt):
+
+    #Join the 3 corner images in a row
+    size = 128
+    batch1= batch[:,:, :(size),:(size)]
+    batch2= batch[:,:, (size):,:(size)]
+    batch3= batch[:,:, :(size),(size):]
+    batch4= batch[:,:, (size):, (size):]
+
+    corners = [batch1, batch2, batch3, batch4]
+
+    #batchleft = tf.concat([batch1, batch2], axis=3)
+    #batchall3 = tf.concat([batchleft, batch3], axis=3)
+    #print(tf.shape(batchall3))
+
+    
+    for corner in corners:
+        with tf.GradientTape() as tape_encoder:
+            mean, logvar = cvae.encode(corner)
+            z = cvae.reparameterize(mean, logvar)
+            reconstruction = cvae.decode(z)
+            #mse = tf.keras.losses.MeanSquaredError(reduction=tf.keras.losses.Reduction.NONE)
+            #reconstruction_loss = 1000 * mse(batchall3,reconstruction)
+            r_w = 1
+            kl_w = 1
+            reconstruction_loss = tf.math.reduce_mean(tf.math.square(corner - reconstruction), axis = [1,2,3])
+            # #reduce mean / reduce  sum ?
+            #reconstruction_loss = tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size)
+            #reconstruction = tf.math.reduce_sum(reconstruction)
+            #add sum tlast 3 elements?
+            #kl_loss = -0.5 * tf.math.reduce_sum(1 + logvar - tf.square(mean) - tf.exp(logvar))
+            kl_loss = - 0.5 * tf.math.reduce_sum(1 + logvar - tf.math.square(mean) - tf.exp(logvar), axis = 1)
+            #kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
+            #kl_loss = tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
+            total_loss = r_w * reconstruction_loss + kl_w * kl_loss
+
+            final_loss = tf.nn.compute_average_loss(total_loss, global_batch_size=global_batch_size)
+
+        encoder_grads = tape_encoder.gradient(final_loss, cvae.trainable_variables)
+
+    
+        opt.apply_gradients(zip(encoder_grads, cvae.trainable_variables))
+
+    return tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size), tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
+
+def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt):
+
+    init_reg_weight = 100
+
+    #Join the 3 corner images in a row
+    size = 128
+    batch1= batch[:,:, :(size),:(size)]
+    batch2= batch[:,:, (size):,:(size)]
+    batch3= batch[:,:, :(size),(size):]
+    batch4= batch[:,:, (size):, (size):]
+
+    corners = [batch1]#, batch2, batch3, batch4]
+
+    #batchleft = tf.concat([batch1, batch2], axis=3)
+    #batchall3 = tf.concat([batchleft, batch3], axis=3)
+    #print(tf.shape(batchall3))
+
+    
+    for corner in corners:
+        with tf.GradientTape() as tape_encoder:
+            mean, logvar = cvae.encode(corner) #do I use mean and logvar?
+            z = cvae.reparameterize(mean, logvar)
+            reconstruction = cvae.decode(z)
+
+            #reg_weight
+            batch_size = tf.shape(corner)[0] 
+            bias_corr = batch_size *  (batch_size - 1)
+            reg_weight = init_reg_weight / bias_corr
+            reg_weight = tf.cast(reg_weight, dtype=tf.float32)
+
+            #mse
+            reconstruction_loss = tf.math.reduce_mean(tf.math.square(corner - reconstruction), axis = [1,2,3])
+           
+            #mmd
+            prior_z = tf.random.normal(tf.shape(z))
+
+            prior_z__kernel = compute_kernel(prior_z, prior_z)
+            z__kernel = compute_kernel(z, z)
+            priorz_z__kernel = compute_kernel(prior_z, z)
+
+            prior_z__kernel_loss = reg_weight * tf.math.reduce_mean(prior_z__kernel)
+            z__kernel_loss = reg_weight * tf.math.reduce_mean(z__kernel)
+            priorz_z__kernel_loss = 2 * reg_weight * tf.math.reduce_mean(priorz_z__kernel)
+
+            mmd_loss = prior_z__kernel_loss + z__kernel_loss - priorz_z__kernel_loss
+
+            #kl_loss = - 0.5 * tf.math.reduce_sum(1 + logvar - tf.math.square(mean) - tf.exp(logvar), axis = 1)
+            #kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
+            #kl_loss = tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
+            total_loss =  reconstruction_loss +  mmd_loss / tf.cast((global_batch_size / batch_size), dtype=tf.float32)
+
+            final_loss = total_loss #tf.nn.compute_average_loss(total_loss, global_batch_size=global_batch_size)
+
+        encoder_grads = tape_encoder.gradient(final_loss, cvae.trainable_variables)
+
+    
+        opt.apply_gradients(zip(encoder_grads, cvae.trainable_variables))
+
+    return tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size), mmd_loss / tf.cast((global_batch_size / batch_size), dtype=tf.float32)#tf.nn.compute_average_loss(mmd_loss, global_batch_size=global_batch_size)
+
+
+def compute_kernel(x1, x2, z_var=2.):
+    # Convert the tensors into row and column vectors
+    D = x1.shape[1]
+    N = x1.shape[0]
+
+    x1 = tf.expand_dims(x1, axis=-2) # Make it into a column tensor
+    x2 = tf.expand_dims(x2, axis=-3) # Make it into a row tensor
+
+    """
+    Usually the below lines are not required, especially in our case,
+    but this is useful when x1 and x2 have different sizes
+    along the 0th dimension.
+    """
+    # x1 = x1.expand(N, N, D)
+    # x2 = x2.expand(N, N, D)
+
+    #compute rbf
+
+    z_dim = tf.cast(tf.shape(x2)[-1], dtype=tf.float32) #what should this be C or W
+    sigma = 2. * z_dim * z_var
+
+    result = tf.math.exp(-tf.math.reduce_mean( tf.math.pow((x1 - x2),2) , axis=-1) / sigma)
+    return result
+
+    # if self.kernel_type == 'rbf':
+    #     result = self.compute_rbf(x1, x2)
+    # elif self.kernel_type == 'imq':
+    #     result = self.compute_inv_mult_quad(x1, x2)
+    # else:
+    #     raise ValueError('Undefined kernel type.')
+
+    #return result
+

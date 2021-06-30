@@ -153,16 +153,50 @@ def calculate_lod(cur_nimg,dataset_res_log2,lod_initial_resolution=32,lod_traini
 
     return lod 
 
+def cvae_plot_loss():
+    with open('saved_models/vae/losses_8.5e-05.pkl', 'rb') as f:
+        losses = pickle.load(f)
+
+    reconstruction_loss = losses['reconstruction_loss']
+    kl_loss = losses['kl_loss']
+
+    loss_entries = len(reconstruction_loss)
+    #batch_size = 64 # there is a point where it switches
+    #final_loss_point = loss_entries * batch_size
+
+    t = np.arange(0.0, loss_entries)
+
+    fig, ax = plt.subplots()
+    ax.plot(t, reconstruction_loss)
+
+    fig.savefig("saved_models/vae/reconstruction_loss.png")
+
+    fig, ax = plt.subplots()
+    ax.plot(t, kl_loss)
+
+    print('Loss ' + str(  kl_loss[-1]))
+
+    #plt.ylim([0, .3])
+
+    fig.savefig("saved_models/vae/kl_loss.png")
+
+    # fig, ax = plt.subplots()
+    # ax.plot(t, gen_loss)
+    # ax.plot(t, disc_loss)
+    # fig.savefig("losses.png")
+    return
+
 
 if __name__ == "__main__":
-    plot_loss()
+    #plot_loss()
+    cvae_plot_loss()
         
-    gen = networks2.generator(256)
-    step = 640
-    gen.load_weights('./saved_models/generator_'+str(step)+'.h5', by_name=True)
-    image = get_image(1)
-    res = 256
-    res = int(np.log2(res))
-    lod_in = calculate_lod(step*1000,res)
-    print(lod_in)
-    generate_image(gen, image, 'fakeimg.png', 256, lod_in=lod_in)
+    # gen = networks2.generator(256)
+    # step = 640
+    # gen.load_weights('./saved_models/generator_'+str(step)+'.h5', by_name=True)
+    # image = get_image(1)
+    # res = 256
+    # res = int(np.log2(res))
+    # lod_in = calculate_lod(step*1000,res)
+    # print(lod_in)
+    # generate_image(gen, image, 'fakeimg.png', 256, lod_in=lod_in)
