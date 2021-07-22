@@ -169,6 +169,8 @@ def cvae_plot_loss():
     fig, ax = plt.subplots()
     ax.plot(t, reconstruction_loss)
 
+    plt.ylim([0, 10])
+
     fig.savefig("saved_models/vae/reconstruction_loss.png")
 
     fig, ax = plt.subplots()
@@ -178,7 +180,7 @@ def cvae_plot_loss():
 
     #plt.ylim([0, .3])
 
-    fig.savefig("saved_models/vae/kl_loss.png")
+    fig.savefig("saved_models/vae/mmd_loss.png")
 
     # fig, ax = plt.subplots()
     # ax.plot(t, gen_loss)

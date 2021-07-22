@@ -32,22 +32,32 @@ def cset(cur_lambda, new_cond, new_lambda): return lambda: tf.cond(new_cond, new
 def generator(resolution=256,num_channels=3,num_replicas=1): #confirm params and confirm initializers strides bias
 
     resolution_log2 = int(np.log2(resolution))
-    dshape=( 3, resolution, resolution) 
-    latent = Input(shape=dshape)
+    noise_shape = 512 #shape of the latent noise
+    ae_shape = 1024 #shape of the latent from the autoencoder
+    #dshape=( 3, resolution, resolution) 
+    latent = Input(shape=noise_shape, name='latent')
     latent = tf.cast(latent, tf.float32)
+    ae_latent = Input(shape=3*ae_shape, name='ae_latent')
+    ae_latent = tf.cast(ae_latent, tf.float32)
     lod_in = Input(shape=(), batch_size=num_replicas, name='lod_in')
     lod_in = tf.cast(lod_in, tf.float32)
     dtype = 'float32'
 
-    x,y = encoder(latent, resolution_log2, gain=np.sqrt(2))
+    #x,y = encoder(latent, resolution_log2, gain=np.sqrt(2))
+
+    #concatenate latent noise with varaiational encoder latent
+
+    x = tf.concat([latent, ae_latent], axis=1) #axis 0 or 1? {is 0 the batch or not?}
+
+    #transform input to a dense (pixelnorm first?)
+    x = transform_generator_input(x,5,resolution_log2,gain=np.sqrt(2),norm=True)
 
 
-
-    x = generator_block(x, 5, y, resolution_log2)
+    x = generator_block(x, 5, resolution_log2)
     images_out = torgb(x, 5)
     for res in range(6, resolution_log2 + 1):
         lod = resolution_log2 - res
-        x = generator_block(x, res, y, resolution_log2)
+        x = generator_block(x, res, resolution_log2)
         img = torgb(x, res)
         images_out = UpSampling2D(size=(2, 2), data_format='channels_first', interpolation='nearest')(images_out)
         images_out = Lerp_clip_layer()([img, images_out, lod_in - lod])
@@ -56,9 +66,9 @@ def generator(resolution=256,num_channels=3,num_replicas=1): #confirm params and
     assert images_out.dtype == tf.as_dtype(dtype)
     images_out = tf.identity(images_out, name='images_out')
     
-    Model(inputs=[latent, lod_in], outputs=[images_out]).summary()
+    Model(inputs=[latent, ae_latent, lod_in], outputs=[images_out]).summary()
     
-    return Model(inputs=[latent, lod_in], outputs=[images_out])
+    return Model(inputs=[latent, ae_latent, lod_in], outputs=[images_out])
 
 def discriminator(resolution=256, num_channels=3, label_size = 0, mbstd_group_size = 4, old_res=128, num_replicas=1):
     resolution_log2 = int(np.log2(resolution))
@@ -94,6 +104,28 @@ def discriminator(resolution=256, num_channels=3, label_size = 0, mbstd_group_si
     
     return Model(inputs=[images_in, lod_in], outputs=[scores_out])
 
+class Combined_Discriminator(tf.keras.Model):
+    """Combined Discriminator with Local and GLobal Discriminator"""
+
+    def __init__(self, resolution=256, num_channels=3, label_size = 0, mbstd_group_size = 4, old_res=128, num_replicas=1):
+        super(Combined_Discriminator, self).__init__()
+        #self.latent_dim = latent_dim
+
+        self.local_discriminator = discriminator(resolution=resolution//2, num_channels=num_channels, label_size = label_size, mbstd_group_size = mbstd_group_size, old_res=old_res, num_replicas=num_replicas)
+
+        self.global_discriminator = discriminator(resolution=resolution, num_channels=num_channels, label_size = label_size, mbstd_group_size = mbstd_group_size, old_res=old_res, num_replicas=num_replicas)
+
+
+    def use_local_discriminator(self, image, lod):
+        scores = self.local_discriminator([image, lod], training=True)
+        return scores
+
+    #calculate z
+    def use_global_discriminator(self, image, lod):
+        scores = self.global_discriminator([image, lod], training=True)
+        return scores
+
+
 def Variational_encoder(resolution=256,num_channels=3,latent_dim=128,kernel_size=3,base_filter=32):
     #variational encoder to encode the 3 images from the original image
     #dshape=( num_channels, int(resolution/2), int(resolution/2*3))
@@ -107,7 +139,7 @@ def Variational_encoder(resolution=256,num_channels=3,latent_dim=128,kernel_size
     #some conv2d for the rgb convertion?
     x = Conv2D(filters=3, kernel_size=3, strides=(1, 1),  padding='same', data_format='channels_first')(x)
 
-    for n_layer in range(0,resolution_log2-4):
+    for n_layer in range(0,resolution_log2-3):
         #if base_filter*2**n_layer > 128:
             #filters = 128
         #else:
@@ -118,21 +150,28 @@ def Variational_encoder(resolution=256,num_channels=3,latent_dim=128,kernel_size
     x = Flatten()(x)
     # No activation
     #one for mean and another for logvar
-    mean = Dense(latent_dim)(x)
-    logvar = Dense(latent_dim)(x)
+    #mean = Dense(latent_dim)(x)
+    #logvar = Dense(latent_dim)(x)
 
-    mean = tf.identity(mean, name='encoded_mean')
-    logvar = tf.identity(logvar, name='encoded_logvar')
+    #mean = tf.identity(mean, name='encoded_mean')
+    #logvar = tf.identity(logvar, name='encoded_logvar')
 
-    Model(inputs=[images_in], outputs=[mean, logvar]).summary()
+    latent = Dense(latent_dim)(x)
+    latent = tf.identity(latent, name='encoded_latent')
+
+    #Model(inputs=[images_in], outputs=[mean, logvar]).summary()
     
-    return Model(inputs=[images_in], outputs=[mean, logvar])
+    #return Model(inputs=[images_in], outputs=[mean, logvar])
+
+    Model(inputs=[images_in], outputs=[latent]).summary()
+    
+    return Model(inputs=[images_in], outputs=[latent])
 
 def Variational_decoder(resolution=256,num_channels=3,latent_dim=128,kernel_size=3,base_filter=32):
     latent_in = Input(shape=(latent_dim))
     resolution_log2 = int(np.log2(resolution))
 
-    base_units = base_filter*2**(resolution_log2-4-1)
+    base_units = base_filter*2**(resolution_log2-3-1)
 
     #values 2 and 6 are in accordance with the concatenated images 
     # 4 corresponds to 256
@@ -142,10 +181,10 @@ def Variational_decoder(resolution=256,num_channels=3,latent_dim=128,kernel_size
     # x = Dense(units=base_units*4*12)(latent_in)
     # x = Reshape(target_shape=(base_units, 4, 12))(x)
 
-    x = Dense(units=base_units*8*8)(latent_in)
-    x = Reshape(target_shape=(base_units, 8, 8))(x)
+    x = Dense(units=base_units*4*4)(latent_in)
+    x = Reshape(target_shape=(base_units, 4, 4))(x)
 
-    for n_layer in range(resolution_log2-4-1,-1,-1):
+    for n_layer in range(resolution_log2-3-1,-1,-1):
         #if base_filter*2**n_layer > 128:
         #    filters = 128
         #else:
@@ -178,9 +217,8 @@ class CVAE(tf.keras.Model):
 
 
     def encode(self, x):
-        mean, logvar = self.encoder(x, training=True)
-        return mean, logvar
-
+        latent = self.encoder(x, training=True)
+        return latent
     #calculate z
     def reparameterize(self, mean, logvar):
         batch = tf.shape(mean)[0]

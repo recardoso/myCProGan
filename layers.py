@@ -194,30 +194,30 @@ def encoder(x, resolution_log2, gain=np.sqrt(2)):
 def nf(stage, fmap_base, fmap_decay, fmap_max): 
     return min(int(fmap_base / (2.0 ** (stage * fmap_decay))), fmap_max)
      
-def generator_block(x,res,y,resolution_log2,gain=np.sqrt(2)):
+def generator_block(x,res,resolution_log2,gain=np.sqrt(2),y=None):
     fmap_base           = 8192        # Overall multiplier for the number of feature maps.
     fmap_decay          = 1.0          # log2 feature map reduction when doubling the resolution.
     fmap_max            = 128          # Maximum number of feature maps in any layer.
     scope_name = '%dx%d' % (2**res, 2**res)
-    y_temp=y
+    # y_temp=y
     if res == 5: # 32x32
         x = Pixel_norm_layer(epsilon=1e-8)(x)
-        x = tf.reshape(x, [-1, 32, 8, 8])
+        x = tf.reshape(x, [-1, 32, 8, 8]) #if res is changed this should change as well
         bias_name = scope_name + '_Dense_bias_PN'
         #x = PN(act(apply_bias(x)))
         x = Bias(input_shape=x.shape, name=bias_name)(x)
         x = LeakyReLU(0.2)(x)
         x = Pixel_norm_layer(epsilon=1e-8)(x)
         name = scope_name + '/Conv'
-        x = upscale_conv2dwscale(x, filters=64, kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
+        x = upscale_conv2dwscale(x, filters=64, kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name) #original uses a conv2d for 4x4 layer
     else: #x64 and up
-        for r in range(resolution_log2, res-1, -1):
-            name = scope_name + 'Conv_down%d_%d' %(res, r)
-            y_temp= conv2d_downscale2dwscale(y_temp, filters=nf(res-5, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=False, activation=True, strides=(1,1), name=name)
+        # for r in range(resolution_log2, res-1, -1):
+        #     name = scope_name + 'Conv_down%d_%d' %(res, r)
+        #     y_temp= conv2d_downscale2dwscale(y_temp, filters=nf(res-5, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=False, activation=True, strides=(1,1), name=name)
         x = UpSampling2D(size=(2, 2), data_format='channels_first', interpolation='nearest')(x)
-        x = tf.concat([x, y_temp], axis=1)
-        name = scope_name + '/ConvConcat'
-        x = conv2dwscale(x, filters=nf(res-5, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
+        # x = tf.concat([x, y_temp], axis=1)
+        # name = scope_name + '/ConvConcat'
+        # x = conv2dwscale(x, filters=nf(res-5, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
         name = scope_name + '/Conv0'
         x = conv2dwscale(x, filters=nf(res-5, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
         name = scope_name + '/Conv1'
@@ -247,5 +247,22 @@ def discriminator_block(x,res,resolution_log2,gain=np.sqrt(2),mbstd_group_size =
         name = scope_name + '/Dense1'
         x = densewscale(x, filters=1+label_size, gain=1, use_pixelnorm=False, activation=True, name=name)     
     return x
+
+def transform_generator_input(x,res,resolution_log2,gain=np.sqrt(2),norm=True):
+    fmap_base           = 8192        # Overall multiplier for the number of feature maps.
+    fmap_decay          = 1.0          # log2 feature map reduction when doubling the resolution.
+    fmap_max            = 128          # Maximum number of feature maps in any layer.
+    scope_name = '%dx%d' % (2**res, 2**res)
+
+    if norm:
+        x = Pixel_norm_layer(epsilon=1e-8)(x)
+        name = scope_name + '/Dense_Input'
+    # original Cprogan used 2048 (128*16), the original uses 8192 (512*16) 
+    # needs to change the 32 on the first reshape in case this is changed
+    x = densewscale(x, filters=128*16, gain=gain/4, use_pixelnorm=False, activation=False, name=name)
+
+    return x
+
+
 
         

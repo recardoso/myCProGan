@@ -68,7 +68,7 @@ def G_wgan_acgan(G, D, opt, training_set, minibatch_size, reals,
     
     return loss
 
-def Generator_loss(G, D, reals, minibatch_size, opt=None, lod_in=0.0, training_set=None, cond_weight = 1.0, network_size=256, global_batch_size = 1): # Weight of the conditioning term.
+def Generator_loss(G, combined_D, encoder, reals, minibatch_size, opt=None, lod_in=0.0, training_set=None, cond_weight = 1.0, network_size=256, global_batch_size = 1): # Weight of the conditioning term.
     print('Mini-batch size G ' + str(minibatch_size))
     size= int(network_size / 2)  
     n_gpus = int(global_batch_size/minibatch_size)  
@@ -78,64 +78,60 @@ def Generator_loss(G, D, reals, minibatch_size, opt=None, lod_in=0.0, training_s
     real3= reals[:,:, :(size),(size):]
     real4= reals[:,:, :(size), :(size)]
     
+    noise_shape = 512
+
+    corners = [real1,real2,real3]
    
     #generate fakes
-    latents = tf.random.normal([minibatch_size, 3, size, size])
-    left = tf.concat([real1, real2], axis=2)
-    right = tf.concat([real3, latents], axis=2)
-    lat_and_cond = tf.concat([left, right], axis=3)
+    # latents = tf.random.normal([minibatch_size, 3, size, size])
+    # left = tf.concat([real1, real2], axis=2)
+    # right = tf.concat([real3, latents], axis=2)
+    # lat_and_cond = tf.concat([left, right], axis=3)
 
-    # file_test = pickle.load( open( 'test_objects.pkl', 'rb' ) )
+    #check axis
+    #realsleft = tf.concat([real1, real2], axis=3)
+    #reals_in_row = tf.concat([realsleft, real3], axis=3)
 
-    # lat_and_cond = file_test['lat_and_cond']
+    #ae_latents = encoder.encode(reals_in_row)
+    
+    #generate noise image
+    latents = tf.random.normal([minibatch_size, noise_shape])
+    
+    ae_latent1 = encoder.encode(real1)
+    ae_latent2 = encoder.encode(real2)
+    ae_latent3 = encoder.encode(real3)
 
-    # lat_and_cond = tf.convert_to_tensor(lat_and_cond)
+    #check axis
+    ae_latent_left = tf.concat([ae_latent1, ae_latent2], axis=1)
+    ae_latents = tf.concat([ae_latent_left, ae_latent3], axis=1)
+    
+
+
 
     
-    print('lat_and_cond : ' + str(lat_and_cond))
-    #tf.print(lat_and_cond)
-
-
-    #get labels  (are there any labels???)
-    #labels = training_set.get_random_labels_tf(minibatch_size)
-
-
-    #fake_images_out_small = G.get_output_for(lat_and_cond, labels, is_training=True)
+    print('lat_and_cond : ' + str(latents))
 
     with tf.GradientTape() as tape:
-        fake_images_out_small = G([lat_and_cond, lod_in], training=True)
-        #tf.print(fake_images_out_small)
+        fake_images_out_small = G([latents, ae_latents, lod_in], training=True)
         fake_image_out_right = tf.concat([real3, fake_images_out_small], axis=2)
         fake_image_out_left = tf.concat([real1, real2], axis=2)
         fake_images_out = tf.concat([fake_image_out_left, fake_image_out_right], axis=3)
-        fake_scores_out= fp32(D([fake_images_out, lod_in], training=True))
+
+        #global Discriminator
+        global_fake_scores_out = fp32(combined_D.use_global_discriminator(fake_images_out, lod_in))
+
+        #local Discriminator
+        local_fake_scores_out = fp32(combined_D.use_local_discriminator(fake_images_out_small, lod_in))
+
+        join_scores = (global_fake_scores_out + local_fake_scores_out) / 2
         #tf.print(fake_scores_out)
-        loss = -fake_scores_out 
-
-
-        #loss = tf.reduce_mean(loss)
-        #tf.print(loss)
-        #loss = tf.nn.compute_average_loss(loss)#, global_batch_size=global_batch_size)
+        loss = -join_scores
         g_loss = tf.reduce_mean(loss) / n_gpus
 
 
-        #tf.print(loss)
-
-    #tf.print('Generator Loss')
-    #tf.print(n_gpus)
-    #tf.print(loss)
-
-    #add label penalty (are there any labels???)
-    #if D.output_shapes[1][1] > 0:
-    #    with tf.name_scope('LabelPenalty'):
-    #        label_penalty_fakes = tf.nn.softmax_cross_entropy_with_logits_v2(labels=labels, logits=fake_labels_out)
-    #    loss += label_penalty_fakes * cond_weight
-
-    #tf.print(var.name for var in tape.watched_variables())
         
     gradients =  tape.gradient(g_loss, G.trainable_variables) # model.trainable_variables or  model.trainable_weights
-    #for var in G.trainable_variables:
-        #tf.print(var.name)
+    
     opt.apply_gradients(zip(gradients, G.trainable_variables)) # model.trainable_variables or  model.trainable_weights
     
     
@@ -447,6 +443,121 @@ def original_Discriminator_loss(G, D, reals, minibatch_size, opt, lod_in=0.0, tr
 
     return loss
 
+def combined_Discriminator_loss(G, combined_D, encoder, reals, minibatch_size, opt, lod_in=0.0, training_set=None, labels=None,
+    wgan_lambda     = 10.0,     # Weight for the gradient penalty term.
+    wgan_epsilon    = 0.001,    # Weight for the epsilon term, \epsilon_{drift}.
+    wgan_target     = 1.0,      # Target value for gradient magnitudes.
+    cond_weight     = 1.0,      # Weight of the conditioning terms.
+    global_batch_size = 1,
+    network_size=256):
+
+    noise_shape = 512
+
+    #loss scalling (it is not doing loss scalling) !!!!
+    n_gpus = int(global_batch_size/minibatch_size)
+    print('Mini-batch size D ' + str(minibatch_size))
+    size= int(network_size / 2) 
+    print('real shape' + str(reals.shape))
+    
+    #get reals:
+    real1= reals[:,:, :(size),:(size)]
+    real2= reals[:,:, (size):,:(size)]
+    real3= reals[:,:, :(size),(size):]
+    real4= reals[:,:, (size):, (size):]
+
+    #check axis
+    # realsleft = tf.concat([real1, real2], axis=3)
+    # reals_in_row = tf.concat([realsleft, real3], axis=3)
+    # ae_latents = encoder.encode(reals_in_row)
+    
+    #generate noise image
+    latents = tf.random.normal([minibatch_size, noise_shape])
+
+    ae_latent1 = encoder.encode(real1)
+    ae_latent2 = encoder.encode(real2)
+    ae_latent3 = encoder.encode(real3)
+
+    #check axis
+    ae_latent_left = tf.concat([ae_latent1, ae_latent2], axis=1)
+    ae_latents = tf.concat([ae_latent_left, ae_latent3], axis=1)
+    
+
+    #needs two gradient tapes because we use the gradeients from the mixed images for the penalties
+    with tf.GradientTape() as grad_total_tape:
+        #first pass through the discriminator with fake and real data
+
+        #generate fake image
+        fake_images_out_small = G([latents, ae_latents, lod_in], training=True)
+        fake_image_out_right = tf.concat([real3, fake_images_out_small], axis=2)
+        fake_image_out_left = tf.concat([real1, real2], axis=2)
+        fake_images_out = tf.concat([fake_image_out_left, fake_image_out_right], axis=3)
+
+        #global Discriminator
+        global_real_scores_out = fp32(combined_D.use_global_discriminator(reals, lod_in))
+        global_fake_scores_out = fp32(combined_D.use_global_discriminator(fake_images_out, lod_in))
+        global_loss = global_fake_scores_out - global_real_scores_out
+
+        #local Discriminator
+        local_real_scores_out = fp32(combined_D.use_local_discriminator(real4, lod_in))
+        local_fake_scores_out = fp32(combined_D.use_local_discriminator(fake_images_out_small, lod_in))
+        local_loss = local_fake_scores_out - local_real_scores_out
+
+        #calculate gradient penalty inside a new gradient tape
+        #mixing factors
+        mixing_factors = tf.random.uniform([minibatch_size, 1, 1, 1], 0.0, 1.0, dtype=fake_images_out.dtype)
+        #mixed images
+        global_mixed_images_out = lerp(tf.cast(reals, fake_images_out.dtype), fake_images_out, mixing_factors)
+        local_mixed_images_out = lerp(tf.cast(real4, fake_images_out_small.dtype), fake_images_out_small, mixing_factors)
+
+        #global_discriminator
+        with tf.GradientTape() as global_grad_penalty_tape:
+            global_grad_penalty_tape.watch(global_mixed_images_out)
+            #get mixed scores
+            global_mixed_scores_out = fp32(combined_D.use_global_discriminator(global_mixed_images_out, lod_in))
+            #final mixed loss
+            global_mixed_loss = tf.math.reduce_sum(global_mixed_scores_out) #might need to change?
+        #get mixed gradients
+        global_mixed_grads = fp32(global_grad_penalty_tape.gradient(global_mixed_loss, [global_mixed_images_out])[0])
+        # normalize gradients
+        global_mixed_norms = tf.math.sqrt(tf.math.reduce_sum(tf.math.square(global_mixed_grads), axis=[1,2,3]))
+        #apply penalty
+        gradient_penalty = tf.math.square(global_mixed_norms - wgan_target)
+        global_loss += gradient_penalty * (wgan_lambda / (wgan_target**2))
+
+        #local_discriminator
+        with tf.GradientTape() as local_grad_penalty_tape:
+            local_grad_penalty_tape.watch(local_mixed_images_out)
+            #get mixed scores
+            local_mixed_scores_out = fp32(combined_D.use_local_discriminator(local_mixed_images_out, lod_in))
+            #final mixed loss
+            local_mixed_loss = tf.math.reduce_sum(local_mixed_scores_out) #might need to change?
+        #get mixed gradients
+        local_mixed_grads = fp32(local_grad_penalty_tape.gradient(local_mixed_loss, [local_mixed_images_out])[0])
+        # normalize gradients
+        local_mixed_norms = tf.math.sqrt(tf.math.reduce_sum(tf.math.square(local_mixed_grads), axis=[1,2,3]))
+        #apply penalty
+        gradient_penalty = tf.math.square(local_mixed_norms - wgan_target)
+        local_loss += gradient_penalty * (wgan_lambda / (wgan_target**2))
+
+
+        #epsilon penalty
+        global_epsilon_penalty = tf.math.square(global_real_scores_out)
+        global_loss += global_epsilon_penalty * wgan_epsilon
+
+        local_epsilon_penalty = tf.math.square(local_real_scores_out)
+        local_loss += local_epsilon_penalty * wgan_epsilon
+
+        
+        join_loss = (global_loss + local_loss) / 2
+        d_loss = tf.reduce_mean(join_loss) / n_gpus
+
+
+    gradients =  grad_total_tape.gradient(d_loss, combined_D.trainable_variables) # model.trainable_variables or  model.trainable_weights
+
+    opt.apply_gradients(zip(gradients, combined_D.trainable_variables)) # model.trainable_variables or  model.trainable_weights
+
+    return d_loss, tf.reduce_mean(global_loss) / n_gpus, tf.reduce_mean(local_loss) / n_gpus
+
 def log_normal_pdf(sample, mean, logvar, raxis=1):
     log2pi = tf.math.log(2. * np.pi)
     return tf.reduce_sum(
@@ -499,7 +610,7 @@ def variationa_auto_encoder_loss(cvae, batch, global_batch_size, opt):
 
     return tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size), tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
 
-def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt):
+def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, kernel_type = 'rbf'):
 
     init_reg_weight = 100
 
@@ -510,17 +621,21 @@ def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt):
     batch3= batch[:,:, :(size),(size):]
     batch4= batch[:,:, (size):, (size):]
 
-    corners = [batch1]#, batch2, batch3, batch4]
+    corners = [batch1, batch2, batch3, batch4]
 
     #batchleft = tf.concat([batch1, batch2], axis=3)
     #batchall3 = tf.concat([batchleft, batch3], axis=3)
     #print(tf.shape(batchall3))
 
+    r_weight = 1
+    mmd_weight = 1
+
     
     for corner in corners:
         with tf.GradientTape() as tape_encoder:
-            mean, logvar = cvae.encode(corner) #do I use mean and logvar?
-            z = cvae.reparameterize(mean, logvar)
+            #mean, logvar = cvae.encode(corner) #do I use mean and logvar?
+            #z = cvae.reparameterize(mean, logvar)
+            z = cvae.encode(corner) #do I use mean and logvar?
             reconstruction = cvae.decode(z)
 
             #reg_weight
@@ -530,25 +645,25 @@ def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt):
             reg_weight = tf.cast(reg_weight, dtype=tf.float32)
 
             #mse
-            reconstruction_loss = tf.math.reduce_mean(tf.math.square(corner - reconstruction), axis = [1,2,3])
+            reconstruction_loss = r_weight * tf.math.reduce_mean(tf.math.square(corner - reconstruction), axis = [1,2,3])
            
             #mmd
             prior_z = tf.random.normal(tf.shape(z))
 
-            prior_z__kernel = compute_kernel(prior_z, prior_z)
-            z__kernel = compute_kernel(z, z)
-            priorz_z__kernel = compute_kernel(prior_z, z)
+            prior_z__kernel = compute_kernel(prior_z, prior_z, kernel_type = kernel_type)
+            z__kernel = compute_kernel(z, z, kernel_type = kernel_type)
+            priorz_z__kernel = compute_kernel(prior_z, z, kernel_type = kernel_type)
 
             prior_z__kernel_loss = reg_weight * tf.math.reduce_mean(prior_z__kernel)
             z__kernel_loss = reg_weight * tf.math.reduce_mean(z__kernel)
             priorz_z__kernel_loss = 2 * reg_weight * tf.math.reduce_mean(priorz_z__kernel)
 
-            mmd_loss = prior_z__kernel_loss + z__kernel_loss - priorz_z__kernel_loss
+            mmd_loss = mmd_weight * (prior_z__kernel_loss + z__kernel_loss - priorz_z__kernel_loss)
 
             #kl_loss = - 0.5 * tf.math.reduce_sum(1 + logvar - tf.math.square(mean) - tf.exp(logvar), axis = 1)
             #kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
             #kl_loss = tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
-            total_loss =  reconstruction_loss +  mmd_loss / tf.cast((global_batch_size / batch_size), dtype=tf.float32)
+            total_loss =  (reconstruction_loss + mmd_loss) / tf.cast((global_batch_size / batch_size), dtype=tf.float32)
 
             final_loss = total_loss #tf.nn.compute_average_loss(total_loss, global_batch_size=global_batch_size)
 
@@ -560,7 +675,7 @@ def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt):
     return tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size), mmd_loss / tf.cast((global_batch_size / batch_size), dtype=tf.float32)#tf.nn.compute_average_loss(mmd_loss, global_batch_size=global_batch_size)
 
 
-def compute_kernel(x1, x2, z_var=2.):
+def compute_kernel(x1, x2, z_var=2., kernel_type = 'rbf'):
     # Convert the tensors into row and column vectors
     D = x1.shape[1]
     N = x1.shape[0]
@@ -578,10 +693,21 @@ def compute_kernel(x1, x2, z_var=2.):
 
     #compute rbf
 
-    z_dim = tf.cast(tf.shape(x2)[-1], dtype=tf.float32) #what should this be C or W
-    sigma = 2. * z_dim * z_var
+    if kernel_type == 'rbf':
+        z_dim = tf.cast(tf.shape(x2)[-1], dtype=tf.float32) #what should this be C or W
+        sigma = 2. * z_dim * z_var
 
-    result = tf.math.exp(-tf.math.reduce_mean( tf.math.pow((x1 - x2),2) , axis=-1) / sigma)
+        result = tf.math.exp(-tf.math.reduce_mean( tf.math.pow((x1 - x2),2) , axis=-1) / sigma)
+
+    elif kernel_type == 'imq':
+        eps = 1e-7
+        z_dim = tf.cast(tf.shape(x2)[-1], dtype=tf.float32)
+        C = 2 * z_dim * z_var
+        kernel = C / (eps + C + tf.math.reduce_sum( tf.math.pow((x1 - x2),2) , axis=-1))
+
+        # Exclude diagonal elements
+        result = tf.math.reduce_sum(kernel) -  tf.math.reduce_sum(tf.linalg.diag_part(kernel))
+
     return result
 
     # if self.kernel_type == 'rbf':
@@ -592,4 +718,3 @@ def compute_kernel(x1, x2, z_var=2.):
     #     raise ValueError('Undefined kernel type.')
 
     #return result
-
