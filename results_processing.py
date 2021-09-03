@@ -242,10 +242,11 @@ def setup_image_grid(dataset_shape, n_images=1, m_size= '1080p'):
     #fakes = np.zeros([int((gw / 2) * gh)] + dataset_shape, dtype=np.float32)
     grid = np.zeros([(gw * 2) * (gh * 2)] + dataset_shape, dtype=np.float32)
     for idx in range(gw * gh):
-        real = images[img_counter]
-        img_counter += 1
 
-        if (idx < n_images) or (idx % n_images == 0):
+        if (idx < n_images):
+            real = images[img_counter]
+            img_counter += 1
+
             corner1= real[:, :(size),:(size)]
             corner2= real[:, (size):,:(size)]
             corner3= real[:, :(size),(size):]
@@ -262,6 +263,9 @@ def setup_image_grid(dataset_shape, n_images=1, m_size= '1080p'):
             grid[idx*2 + n_images * 2 +1] = corner4
 
         if (idx % n_images == 0) and idx != 0:
+            real = images[img_counter]
+            img_counter += 1
+
             corner1= real[:, :(size),:(size)]
             corner2= real[:, (size):,:(size)]
             corner3= real[:, :(size),(size):]
