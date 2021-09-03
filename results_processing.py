@@ -329,11 +329,11 @@ def generate_big_image(n_images, cvae_model, gen_model, lod_in = 0.0):
 
             corner4 = tf.cast(gen_model([latents, ae_latents, lod_in], training=False), tf.float32) 
 
-            image_right = tf.cast(tf.concat([corner3, corner4], axis=2), tf.float32)
-            image_left = tf.cast(tf.concat([corner1, corner2], axis=2), tf.float32)
-            image_full = tf.concat([image_left, image_right], axis=3)
+            #image_right = tf.cast(tf.concat([corner3, corner4], axis=2), tf.float32)
+            #image_left = tf.cast(tf.concat([corner1, corner2], axis=2), tf.float32)
+            #image_full = tf.concat([image_left, image_right], axis=3)
 
-            predictions = image_full.numpy()
+            predictions = corner4.numpy()
 
             grid_fakes = predictions[0]
 
