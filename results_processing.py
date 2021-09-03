@@ -257,8 +257,8 @@ def setup_image_grid(dataset_shape, n_images=1, m_size= '1080p'):
             corner4 = adjust_dynamic_range(corner4, [0,255], [-1,1])
 
             grid[idx*2] = corner1
-            grid[idx*2+1] = corner2
-            grid[idx*2 + n_images * 2] = corner3
+            grid[idx*2+1] = corner3
+            grid[idx*2 + n_images * 2] = corner2
             grid[idx*2 + n_images * 2 +1] = corner4
 
         if (idx % n_images == 0) and idx != 0:
@@ -273,8 +273,8 @@ def setup_image_grid(dataset_shape, n_images=1, m_size= '1080p'):
             corner4 = adjust_dynamic_range(corner4, [0,255], [-1,1])
 
             grid[idx*2 *2] = corner1
-            grid[idx*2 *2 +1] = corner2
-            grid[idx*2 *2 + n_images * 2] = corner3
+            grid[idx*2 *2 +1] = corner3
+            grid[idx*2 *2 + n_images * 2] = corner2
             grid[idx*2 *2 + n_images * 2 +1] = corner4
 
 
@@ -385,7 +385,7 @@ if __name__ == "__main__":
     cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
     cvae.load_weights('models/cvae_Final.h5')
 
-    n_images = 1
+    n_images = 2
 
     gw, gh, grid_to_save = generate_big_image(n_images, cvae, gen, lod_in = 0.0)
     save_grid(gw, gh, grid_to_save, dataset_shape=None,step=0)
