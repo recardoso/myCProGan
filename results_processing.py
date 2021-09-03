@@ -295,10 +295,10 @@ def setup_image_grid(dataset_shape, n_images=1, m_size= '1080p'):
     return gw, gh, grid
 
 def generate_big_image(n_images, cvae_model, gen_model, lod_in = 0.0):
-    gw, gh, grid = setup_image_grid(dataset_shape=[3,128,128], n_images=1, m_size= '1080p')
+    gw, gh, grid = setup_image_grid(dataset_shape=[3,128,128], n_images=n_images, m_size= '1080p')
     total_n_images = n_images * 2 * n_images * 2
     for imgi in range(total_n_images):
-        if imgi > n_images * 2 and imgi < (total_n_images - n_images) and (imgi % (n_images * 2)) != 0 and imgi % (n_images * 2) != (n_images * 2 - 1):
+        if imgi > n_images * 2 and imgi < (total_n_images - n_images * 2) and (imgi % (n_images * 2)) != 0 and imgi % (n_images * 2) != (n_images * 2 - 1):
 
             corner1 = np.zeros((1, 3, 128, 128))
             corner2 = np.zeros((1, 3, 128, 128))
@@ -333,9 +333,9 @@ def generate_big_image(n_images, cvae_model, gen_model, lod_in = 0.0):
 
             grid_fakes = predictions[0]
 
-            grid_fakes = adjust_dynamic_range(grid_fakes, [-1,1], [0,255])
+            #grid_fakes = adjust_dynamic_range(grid_fakes, [-1,1], [0,255])
 
-            grid[imgi + + n_images * 2 +1] = grid_fakes#.transpose(1, 2, 0) # CHW -> HWC
+            grid[imgi + n_images * 2 +1] = grid_fakes#.transpose(1, 2, 0) # CHW -> HWC
 
             #image = adjust_dynamic_range(image, drange_net, drange_data)
 
@@ -343,6 +343,7 @@ def generate_big_image(n_images, cvae_model, gen_model, lod_in = 0.0):
 
     for el in grid:
         #gridi = el.transpose(1, 2, 0) 
+        el = adjust_dynamic_range(el, [-1,1], [0,255])
         grid_to_save.append(el)
 
     return gw, gh, grid_to_save
