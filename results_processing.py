@@ -295,7 +295,7 @@ def setup_image_grid(dataset_shape, n_images=1, m_size= '1080p'):
     return gw, gh, grid
 
 def generate_big_image(n_images, cvae_model, gen_model, lod_in = 0.0):
-    gw, gh, grid = setup_image_grid(dataset_shape=(3,128,128), n_images=1, m_size= '1080p')
+    gw, gh, grid = setup_image_grid(dataset_shape=[3,128,128], n_images=1, m_size= '1080p')
     total_n_images = n_images * 2 * n_images * 2
     for imgi in range(total_n_images):
         if imgi > n_images * 2 and imgi < (total_n_images - n_images) and (imgi % (n_images * 2)) != 0 and imgi % (n_images * 2) != (n_images * 2 - 1):
@@ -349,13 +349,15 @@ def generate_big_image(n_images, cvae_model, gen_model, lod_in = 0.0):
 
 def save_grid(gw, gh,grid,dataset_shape=None,step=0):
     num, img_w, img_h = len(grid), grid[0].shape[2], grid[0].shape[1]
-    #print(num, img_w, img_h)
+    print(num, img_w, img_h)
+    print(gw,gh)
 
 
     save_grid = np.zeros([grid[0].shape[0]] + [gh * 2 * img_h, gw * 2 * img_w], dtype=np.float32)
     for idx in range(num):
-        x = (idx % gw) * img_w
-        y = (idx // gw) * img_h
+        x = (idx % (gw * 2)) * img_w
+        y = (idx // (gw * 2)) * img_h
+        print(x,y)
         save_grid[..., y : y + img_h, x : x + img_w] = grid[idx]
 
     image = save_grid.transpose(1, 2, 0) 
@@ -380,7 +382,7 @@ if __name__ == "__main__":
     gen.load_weights('models/generator_8000.h5')
     cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=1024)
     cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
-    cvae.load_weights('saved_models/cvae_Final.h5')
+    cvae.load_weights('models/cvae_Final.h5')
 
     n_images = 1
 
