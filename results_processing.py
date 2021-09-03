@@ -370,6 +370,11 @@ if __name__ == "__main__":
     #plot_loss()
     #cvae_plot_loss()
 
+    physical_devices = tf.config.list_physical_devices('GPU')
+    print(physical_devices)
+    tf.config.set_visible_devices(physical_devices[1:], 'GPU')
+
+
     gen = networks2.generator(256, num_replicas = 1)
     gen.built = True
     gen.load_weights('models/generator_8000.h5')
