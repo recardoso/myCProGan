@@ -629,6 +629,7 @@ def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, kernel_ty
 
     r_weight = 1
     mmd_weight = 1
+    angle_weight= 1
 
     
     for corner in corners:
@@ -647,6 +648,13 @@ def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, kernel_ty
             #mse
             reconstruction_loss = r_weight * tf.math.reduce_mean(tf.math.square(corner - reconstruction), axis = [1,2,3])
            
+            #angle between the RGB triplet
+            #https://arxiv.org/pdf/1504.04548.pdf
+            #https://arxiv.org/pdf/1906.01340.pdf
+
+
+            rgbangle = angle_weight * tf.math.reduce_mean(tf.math.acos(tf.math.reduce_sum(tf.math.multiply(corner, reconstruction)) / (tf.math.sqrt(tf.math.reduce_sum(tf.math.square(corner))) * tf.math.sqrt(tf.math.reduce_sum(tf.math.square(reconstruction))))))
+
             #mmd
             prior_z = tf.random.normal(tf.shape(z))
 
@@ -663,7 +671,7 @@ def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, kernel_ty
             #kl_loss = - 0.5 * tf.math.reduce_sum(1 + logvar - tf.math.square(mean) - tf.exp(logvar), axis = 1)
             #kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
             #kl_loss = tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
-            total_loss =  (reconstruction_loss + mmd_loss) / tf.cast((global_batch_size / batch_size), dtype=tf.float32)
+            total_loss =  (reconstruction_loss + mmd_loss + rgbangle) / tf.cast((global_batch_size / batch_size), dtype=tf.float32)
 
             final_loss = total_loss #tf.nn.compute_average_loss(total_loss, global_batch_size=global_batch_size)
 

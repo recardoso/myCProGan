@@ -14,12 +14,12 @@ import loss
 from tensorflow.keras.optimizers import Adam
 
 from tensorflow.keras.utils import to_categorical, plot_model
-import tensorflow_datasets as tfds
+#import tensorflow_datasets as tfds
 
 from PIL import Image
 
 import pickle
-import optuna
+#import optuna
 
 
 
@@ -148,8 +148,8 @@ def get_dataset(tfr_files,      # Directory containing a collection of tfrecords
     _tf_datasets=dict()
     _tf_batch_sizes = dict()
 
-    #print(tfr_shapes)
-    #print(tfr_lods)
+    print(tfr_shapes)
+    print(tfr_lods)
 
     #calculate minibatch size for batching
     # minibatch_base = 16
@@ -704,7 +704,8 @@ def generate_image(gen, img, saveloc, fullsize, lod_in=0.0):
     return
 
 def snapshot(n_images=1, save=False):
-    tfrecord_dir = '/home/renato/dataset/satimages'
+    #tfrecord_dir = '/home/renato/dataset/satimages'
+    tfrecord_dir =  '/eos/user/r/redacost/progan/tfrecords1024/'
     tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir, '*.tfrecords')))
     minibatch_base = 32
     minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 64, 64: 64, 128: 32}
@@ -712,6 +713,7 @@ def snapshot(n_images=1, save=False):
     dataset_list, batch_sizes_list = get_dataset(tfr_files, num_gpus=1, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu)
     lod_dataset = 0
     dataset = dataset_list[lod_dataset]
+    print(dataset)
     #(train, val, test) = tfds.load("eurosat/rgb", split=["train[:100%]", "train[80%:90%]", "train[90%:]"])
 
     # def prepare_training_data(datapoint):
@@ -767,7 +769,8 @@ def encoder_train_cycle(lr=0.0005):
 
     #initialization of paths
     #tfrecord_dir = '/home/renato/dataset'
-    tfrecord_dir = '/home/renato/dataset/satimages'
+    #tfrecord_dir = '/home/renato/dataset/satimages'
+    tfrecord_dir =  '/eos/user/r/redacost/progan/tfrecords1024/'
 
     start_init = time.time()
     f = [0.9, 0.1] # train, test fractions might be necessary
@@ -1212,16 +1215,21 @@ def save_grid_pgan(gw, gh,grid,dataset_shape=None,step=0):
 
 
 if __name__ == "__main__":
-    #os.environ["CUDA_VISIBLE_DEVICES"]="0"
+    os.environ["CUDA_VISIBLE_DEVICES"]="1"
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    #i = 0
+    for gpu in gpus:
+        #print(i)
+        tf.config.experimental.set_memory_growth(gpu, True)
     #np.random.seed(1000)
     #tf.random.set_seed(np.random.randint(1 << 31))
-    train_cycle()
+    # train_cycle()
 #    gen = networks.named_generator_model(256)
 #    gen.load_weights('generator_Final.h5', by_name=True)
 #    image = get_image(1)
 #    generate_image(gen, image, 'fakeimg.png', 256, lod_in=0.0)
-    # model = encoder_train_cycle(lr=8.5e-5)
-    # generate_decoded_image(model)
+    model = encoder_train_cycle(lr=8.5e-5)
+    generate_decoded_image(model)
     #study = optuna.create_study()
     #study.optimize(objective, n_trials=100, callbacks=[print_best_callback])
     #gw, gh, reals, fakes, grid = setup_image_grid([3,128,128],  m_size = '1080p')

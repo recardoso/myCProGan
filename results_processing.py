@@ -389,7 +389,7 @@ if __name__ == "__main__":
     cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
     cvae.load_weights('models/cvae_Final.h5')
 
-    n_images = 2
+    n_images = 5
 
     gw, gh, grid_to_save = generate_big_image(n_images, cvae, gen, lod_in = 0.0)
     save_grid(gw, gh, grid_to_save, dataset_shape=None,step=0)
