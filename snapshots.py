@@ -257,7 +257,7 @@ def setup_image_grid(datapath,dataset_shape, m_size= '1080p', is_ae=True):
     else:
         size = int(size / 2)
 
-        images = snapshot(datapath,n_images=int(gw * gh), save=False,outpath=outpath)
+        images = snapshot(datapath,n_images=int(gw * gh), save=False)
 
         # Fill in reals and labels.
         reals = np.zeros([int(gw * gh)] + dataset_shape, dtype=np.float32)
