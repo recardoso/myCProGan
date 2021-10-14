@@ -289,6 +289,8 @@ def train_cycle():
     datapath = params.datapath
     outpath = params.outpath
 
+    dict_batch_size = params.batch_size
+
     init_res = params.init_res
     max_res = params.max_res
     change_model = params.change_model
@@ -300,8 +302,8 @@ def train_cycle():
     lod_training_kimg = params.lod_training_kimg
     lod_transition_kimg = params.lod_transition_kimg
     minibatch_base = params.minibatch_base 
-    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 8, 64: 8, 128: 8}
-    max_minibatch_per_gpu = {256: 8, 512: 8, 1024: 8}
+    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: dict_batch_size, 64: dict_batch_size, 128: dict_batch_size}
+    max_minibatch_per_gpu = {256: dict_batch_size, 512: 8, 1024: 8}
     G_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
     D_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
     total_kimg = params.total_kimg
@@ -363,7 +365,7 @@ def train_cycle():
                 #plot_model(disc, show_shapes=True, dpi=64)
                 cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
                 cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
-                cvae.load_weights('saved_models/vae/cvae_models/cvae_Final.h5')
+                cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final.h5')
         else:
             with strategy.scope():
                 gen = networks2.generator(256, num_replicas = num_replicas)
@@ -373,7 +375,7 @@ def train_cycle():
                 #plot_model(disc, show_shapes=True, dpi=64)
                 cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
                 cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
-                cvae.load_weights('saved_models/vae/cvae_models/cvae_Final.h5')
+                cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final.h5')
     else:
         if change_model:
             gen = networks2.generator(init_res) #choose resolution
@@ -382,7 +384,7 @@ def train_cycle():
             #plot_model(disc, show_shapes=True, dpi=64)
             cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
             cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
-            cvae.load_weights('saved_models/vae/cvae_models/cvae_Final.h5')
+            cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final.h5')
         else:
             gen = networks2.generator(256) #choose resolution
             #plot_model(gen, show_shapes=True, dpi=64)
@@ -390,7 +392,7 @@ def train_cycle():
             #plot_model(disc, show_shapes=True, dpi=64)
             cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
             cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
-            cvae.load_weights('saved_models/vae/cvae_models/cvae_Final.h5')
+            cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final.h5')
 
     #D_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
     #G_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
@@ -501,7 +503,7 @@ def train_cycle():
     local_loss_train = []
 
 
-    gw, gh, reals, fakes, grid = setup_image_grid([3,256,256],  m_size = '1080p', is_ae=False)
+    gw, gh, reals, fakes, grid = setup_image_grid(datapath, [3,256,256],  m_size = '1080p', is_ae=False)
 
     # curr_image = 4512000
     # with strategy.scope():
@@ -640,7 +642,7 @@ def train_cycle():
             print('\n')
             train_time = time.time()
             grid = construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=cvae, gen_model=gen, lod_in=lod_in_value)
-            save_grid_pgan(gw, gh,grid, step=curr_image)
+            save_grid_pgan(gw, gh,grid, step=curr_image,outpath=outpath)
 
         if curr_image % (global_batch_size * 10000) == 0:
             # save model
@@ -870,6 +872,9 @@ def get_parser():
     parser.add_argument('--total_kimg', action='store', type=int, default=1200)
     parser.add_argument('--minibatch_repeats', action='store', type=int, default=4)
     parser.add_argument('--D_repeats', action='store', type=int, default=1)
+
+    #batch size (total value, it is then divided by each gpu)
+    parser.add_argument('--batch_size', action='store', type=int, default=8)
     
     #parser.add_argument('--do_profiling', action='store', default=False)
     return parser
@@ -877,24 +882,18 @@ def get_parser():
 
 
 if __name__ == "__main__":
-    os.environ["CUDA_VISIBLE_DEVICES"]="1"
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    #i = 0
-    for gpu in gpus:
-        #print(i)
-        tf.config.experimental.set_memory_growth(gpu, True)
-    #np.random.seed(1000)
-    #tf.random.set_seed(np.random.randint(1 << 31))
+    #os.environ["CUDA_VISIBLE_DEVICES"]="1"
+    #gpus = tf.config.experimental.list_physical_devices('GPU')
+    #for gpu in gpus:
+    #    tf.config.experimental.set_memory_growth(gpu, True)
+
+    # For pgan training
     train_cycle()
-#    gen = networks.named_generator_model(256)
-#    gen.load_weights('generator_Final.h5', by_name=True)
-#    image = get_image(1)
-#    generate_image(gen, image, 'fakeimg.png', 256, lod_in=0.0)
+
+    #for auto encoder training
     #model = encoder_train_cycle(lr=8.5e-5)
-    #generate_decoded_image(model)
+
+
     #study = optuna.create_study()
     #study.optimize(objective, n_trials=100, callbacks=[print_best_callback])
-    #gw, gh, reals, fakes, grid = setup_image_grid([3,128,128],  m_size = '1080p')
-    #grid = construct_grid_to_save(gw, gh, reals, fakes, grid, model=None, step=0)
-    #save_grid(gw, gh,grid)
     print('Finished Training')

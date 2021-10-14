@@ -96,9 +96,10 @@ def generate_image(gen, img, saveloc, fullsize, lod_in=0.0):
 
     return
 
-def snapshot(n_images=1, save=False):
+def snapshot(datapath,n_images=1, save=False):
     #tfrecord_dir = '/home/renato/dataset/satimages'
-    tfrecord_dir =  '/eos/user/r/redacost/progan/tfrecords1024/'
+    #tfrecord_dir =  '/eos/user/r/redacost/progan/tfrecords1024/'
+    tfrecord_dir = datapath
     tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir, '*.tfrecords')))
     minibatch_base = 32
     minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 64, 64: 64, 128: 32}
@@ -218,7 +219,7 @@ def objective(trial):
 def print_best_callback(study, trial):
     print(f"Best value: {study.best_value}, Best params: {study.best_trial.params}")
 
-def setup_image_grid(dataset_shape, m_size= '1080p', is_ae=True):
+def setup_image_grid(datapath,dataset_shape, m_size= '1080p', is_ae=True):
 
     # Select size
     gw = 1; gh = 1
@@ -235,7 +236,7 @@ def setup_image_grid(dataset_shape, m_size= '1080p', is_ae=True):
 
     if is_ae:
 
-        images = snapshot(n_images=int((gw / 2)) * gh, save=False)
+        images = snapshot(datapath,n_images=int((gw / 2)) * gh, save=False)
 
         # Fill in reals and labels.
         reals = np.zeros([int((gw / 2) * gh)] + dataset_shape, dtype=np.float32)
@@ -256,7 +257,7 @@ def setup_image_grid(dataset_shape, m_size= '1080p', is_ae=True):
     else:
         size = int(size / 2)
 
-        images = snapshot(n_images=int(gw * gh), save=False)
+        images = snapshot(datapath,n_images=int(gw * gh), save=False,outpath=outpath)
 
         # Fill in reals and labels.
         reals = np.zeros([int(gw * gh)] + dataset_shape, dtype=np.float32)
@@ -398,7 +399,7 @@ def save_grid(gw, gh,grid,dataset_shape=None,step=0):
 
     return save_grid
 
-def save_grid_pgan(gw, gh,grid,dataset_shape=None,step=0):
+def save_grid_pgan(gw, gh,grid,dataset_shape=None,step=0,outpath=''):
     num, img_w, img_h = len(grid), grid[0].shape[2], grid[0].shape[1]
     #print(num, img_w, img_h)
 
@@ -412,6 +413,6 @@ def save_grid_pgan(gw, gh,grid,dataset_shape=None,step=0):
     image = save_grid.transpose(1, 2, 0) 
     image = np.rint(image).clip(0, 255).astype(np.uint8)
     format = 'RGB'
-    image = Image.fromarray(image, format).save('saved_models/pgan/snapshots/grid_'+str(step)+'.png')
+    image = Image.fromarray(image, format).save(outpath+'saved_models/pgan/snapshots/grid_'+str(step)+'.png')
 
     return save_grid
