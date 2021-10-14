@@ -23,7 +23,7 @@ from tensorflow.keras.layers import Layer, InputSpec, Conv2D, Conv2DTranspose, A
 from tensorflow.keras.layers import Input, UpSampling2D, Dropout, Concatenate, Add, Dense, Multiply, LeakyReLU, Flatten, AveragePooling2D, Multiply
 
 #Use for tensorflow 2
-from tensorflow.python.keras.layers.ops import core as core_ops
+#from tensorflow.python.keras.layers.ops import core as core_ops
 
 def lerp(a, b, t): return a + (b - a) * t
 def lerp_clip(a, b, t): return a + (b - a) * tf.clip_by_value(t, 0.0, 1.0)

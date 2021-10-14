@@ -610,6 +610,54 @@ def variationa_auto_encoder_loss(cvae, batch, global_batch_size, opt):
 
     return tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size), tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
 
+def beta_auto_encoder_loss(cvae, batch, global_batch_size, opt, iter):
+
+    #Join the 3 corner images in a row
+    size = 128
+    batch1= batch[:,:, :(size),:(size)]
+    batch2= batch[:,:, (size):,:(size)]
+    batch3= batch[:,:, :(size),(size):]
+    batch4= batch[:,:, (size):, (size):]
+
+    corners = [batch1, batch2, batch3, batch4]
+
+    r_w = 1
+    kl_w = 1
+
+    #batchleft = tf.concat([batch1, batch2], axis=3)
+    #batchall3 = tf.concat([batchleft, batch3], axis=3)
+    #print(tf.shape(batchall3))
+
+    
+    for corner in corners:
+        with tf.GradientTape() as tape_encoder:
+            mean, logvar = cvae.encode(corner)
+            z = cvae.reparameterize(mean, logvar)
+            reconstruction = cvae.decode(z)
+            #mse = tf.keras.losses.MeanSquaredError(reduction=tf.keras.losses.Reduction.NONE)
+            #reconstruction_loss = 1000 * mse(batchall3,reconstruction)
+            reconstruction_loss = tf.math.reduce_mean(tf.math.square(corner - reconstruction), axis = [1,2,3])
+            # #reduce mean / reduce  sum ?
+            #reconstruction_loss = tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size)
+            #reconstruction = tf.math.reduce_sum(reconstruction)
+            #add sum tlast 3 elements?
+            #kl_loss = -0.5 * tf.math.reduce_sum(1 + logvar - tf.square(mean) - tf.exp(logvar))
+            kl_loss = - 0.5 * tf.math.reduce_sum(1 + logvar - tf.math.square(mean) - tf.exp(logvar), axis = 1)
+            #kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
+            #kl_loss = tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
+
+            C = tf.clip_by_value(cvae.C_max/cvae.C_stop_iter * iter, 0, cvae.C_max)
+            total_loss = reconstruction_loss + cvae.gamma * kl_w* (kl_loss - C).abs()
+
+            final_loss = total_loss#tf.nn.compute_average_loss(total_loss, global_batch_size=global_batch_size)
+
+        encoder_grads = tape_encoder.gradient(final_loss, cvae.trainable_variables)
+
+    
+        opt.apply_gradients(zip(encoder_grads, cvae.trainable_variables))
+
+    return tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size), tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
+
 def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, kernel_type = 'rbf'):
 
     init_reg_weight = 100
@@ -652,8 +700,21 @@ def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, kernel_ty
             #https://arxiv.org/pdf/1504.04548.pdf
             #https://arxiv.org/pdf/1906.01340.pdf
 
+            # numerator = tf.math.reduce_sum(tf.math.multiply(corner, reconstruction), axis = 1)
+            # denominator = tf.math.multiply(tf.math.sqrt(tf.math.reduce_sum(tf.math.square(corner), axis = 1)) ,tf.math.sqrt(tf.math.reduce_sum(tf.math.square(reconstruction), axis = 1))) #+ 1e-8
 
-            rgbangle = angle_weight * tf.math.reduce_mean(tf.math.acos(tf.math.reduce_sum(tf.math.multiply(corner, reconstruction)) / (tf.math.sqrt(tf.math.reduce_sum(tf.math.square(corner))) * tf.math.sqrt(tf.math.reduce_sum(tf.math.square(reconstruction))))))
+            # tf.print('a')
+            #tf.print(numerator)
+            # tf.print('b')
+            #tf.print(denominator)
+
+            #tf.print(tf.math.reduce_mean(tf.math.acos(tf.clip_by_value( (numerator / denominator ), -1 + 1e-7, 1 - 1e-7 )),axis=[1,2]))
+
+            #tf acos has problems with the boundaries, gradients go to infinite
+            #rgbangle = angle_weight * tf.math.reduce_mean(tf.math.acos(tf.clip_by_value( (numerator / denominator ), -1 + 1e-7, 1 - 1e-7 )),axis=[1,2])
+            
+            #tf.print(rgbangle)
+            #tf.print(tf.nn.compute_average_loss(rgbangle, global_batch_size=global_batch_size))
 
             #mmd
             prior_z = tf.random.normal(tf.shape(z))
@@ -671,16 +732,21 @@ def wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, kernel_ty
             #kl_loss = - 0.5 * tf.math.reduce_sum(1 + logvar - tf.math.square(mean) - tf.exp(logvar), axis = 1)
             #kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
             #kl_loss = tf.nn.compute_average_loss(kl_loss, global_batch_size=global_batch_size)
-            total_loss =  (reconstruction_loss + mmd_loss + rgbangle) / tf.cast((global_batch_size / batch_size), dtype=tf.float32)
+            total_loss =  (reconstruction_loss + mmd_loss) / tf.cast((global_batch_size / batch_size), dtype=tf.float32)
 
             final_loss = total_loss #tf.nn.compute_average_loss(total_loss, global_batch_size=global_batch_size)
 
         encoder_grads = tape_encoder.gradient(final_loss, cvae.trainable_variables)
-
     
         opt.apply_gradients(zip(encoder_grads, cvae.trainable_variables))
 
-    return tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size), mmd_loss / tf.cast((global_batch_size / batch_size), dtype=tf.float32)#tf.nn.compute_average_loss(mmd_loss, global_batch_size=global_batch_size)
+        #tf.print(tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size))
+        #tf.print(mmd_loss / tf.cast((global_batch_size / batch_size), dtype=tf.float32))
+        # tf.print(tf.nn.compute_average_loss(numerator, global_batch_size=global_batch_size))
+        # tf.print(tf.nn.compute_average_loss(denominator, global_batch_size=global_batch_size))
+        # tf.print(tf.nn.compute_average_loss(rgbangle, global_batch_size=global_batch_size))
+
+    return tf.nn.compute_average_loss(reconstruction_loss, global_batch_size=global_batch_size), mmd_loss / tf.cast((global_batch_size / batch_size), dtype=tf.float32)#, tf.nn.compute_average_loss(rgbangle, global_batch_size=global_batch_size)#tf.nn.compute_average_loss(mmd_loss, global_batch_size=global_batch_size)
 
 
 def compute_kernel(x1, x2, z_var=2., kernel_type = 'rbf'):

@@ -23,7 +23,7 @@ from tensorflow.keras.layers import Input, UpSampling2D, Dropout, Concatenate, A
 from layers import *
 
 #Use for tensorflow 2
-from tensorflow.python.keras.layers.ops import core as core_ops
+#from tensorflow.python.keras.layers.ops import core as core_ops
 
 def lerp(a, b, t): return a + (b - a) * t
 def lerp_clip(a, b, t): return a + (b - a) * tf.clip_by_value(t, 0.0, 1.0)
@@ -33,7 +33,7 @@ def generator(resolution=256,num_channels=3,num_replicas=1): #confirm params and
 
     resolution_log2 = int(np.log2(resolution))
     noise_shape = 512 #shape of the latent noise
-    ae_shape = 1024 #shape of the latent from the autoencoder
+    ae_shape = 512 #shape of the latent from the autoencoder
     #dshape=( 3, resolution, resolution) 
     latent = Input(shape=noise_shape, name='latent')
     latent = tf.cast(latent, tf.float32)
@@ -50,7 +50,8 @@ def generator(resolution=256,num_channels=3,num_replicas=1): #confirm params and
     x = tf.concat([latent, ae_latent], axis=1) #axis 0 or 1? {is 0 the batch or not?}
 
     #transform input to a dense (pixelnorm first?)
-    x = transform_generator_input(x,5,resolution_log2,gain=np.sqrt(2),norm=True)
+    # transfprmation to dense might remove the random noise making the whole training pointless
+    #x = transform_generator_input(x,5,resolution_log2,gain=np.sqrt(2),norm=True)
 
 
     x = generator_block(x, 5, resolution_log2)
@@ -204,6 +205,7 @@ def Variational_decoder(resolution=256,num_channels=3,latent_dim=128,kernel_size
     
     return Model(inputs=[latent_in], outputs=[decoded_image])
 
+
 class CVAE(tf.keras.Model):
     """Convolutional variational autoencoder."""
 
@@ -226,10 +228,13 @@ class CVAE(tf.keras.Model):
         eps = tf.random.normal(shape=(batch, dim))
         return eps * tf.exp(logvar * .5) + mean
 
-    def decode(self, z, apply_sigmoid=False):
+    def decode(self, z, apply_sigmoid=False, apply_tahn=False):
         logits = self.decoder(z, training=True)
         if apply_sigmoid:
             probs = tf.sigmoid(logits)
+            return probs
+        if apply_tahn:
+            probs = tf.keras.activations.tanh(logits)
             return probs
         return logits
 
@@ -239,6 +244,44 @@ class CVAE(tf.keras.Model):
         if eps is None:
             eps = tf.random.normal(shape=(100, latent_dim))
         return self.decode(eps,self.decoder, apply_sigmoid=True)
+
+class Beta_VAE(tf.keras.Model):
+    def __init__(self, resolution=256, num_channels=3, latent_dim=128,kernel_size=3,base_filter=32,beta=4,gamma=1000.,max_capacity=25,Capacity_max_iter=1e5):
+        super(Beta_VAE, self).__init__()
+        self.latent_dim = latent_dim
+        self.beta = beta
+        self.gamma = gamma
+        self.C_max = max_capacity
+        self.C_stop_iter = Capacity_max_iter
+
+        self.encoder = Variational_encoder(resolution=resolution,num_channels=num_channels,latent_dim=self.latent_dim,kernel_size=kernel_size,base_filter=base_filter)
+
+        self.mean = Dense(latent_dim/2)
+        self.var = Dense(latent_dim/2)
+
+        self.decoder = Variational_decoder(resolution=resolution,num_channels=num_channels,latent_dim=self.latent_dim,kernel_size=kernel_size,base_filter=base_filter)
+
+    def encode(self, x):
+        latent = self.encoder(x, training=True)
+        mean = self.mean(latent)
+        var = self.var(latent)
+        return mean,var
+
+    def decode(self, z, apply_sigmoid=False, apply_tahn=False):
+        logits = self.decoder(z, training=True)
+        if apply_sigmoid:
+            probs = tf.sigmoid(logits)
+            return probs
+        if apply_tahn:
+            probs = tf.keras.activations.tanh(logits)
+            return probs
+        return logits
+
+    def reparameterize(self, mean, logvar):
+        batch = tf.shape(mean)[0]
+        dim = tf.shape(mean)[1]
+        eps = tf.random.normal(shape=(batch, dim))
+        return eps * tf.exp(logvar * .5) + mean
 
 
 if __name__ == "__main__":

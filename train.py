@@ -3,12 +3,15 @@ import time
 import numpy as np
 import tensorflow as tf
 import glob
+import argparse
+import json
 
 #import config
 #import tfutil
 #import dataset
 import networks2
 import loss
+from snapshots import *
 #import misc
 
 from tensorflow.keras.optimizers import Adam
@@ -250,6 +253,26 @@ def TrainingSchedule(
 
 
 #for 4 GPUS
+# lod_training_kimg = 300
+# lod_transition_kimg = 1500
+
+# minibatch_base = 16
+# minibatch_dict = {4: 512, 8: 256, 16: 128, 32: 64, 64: 32, 128: 16}
+# max_minibatch_per_gpu = {256: 8, 512: 4, 1024: 2}
+# G_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
+# D_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
+# total_kimg = 12000
+
+#for 1 GPU
+# lod_training_kimg = 300
+# lod_transition_kimg = 1500
+
+# minibatch_base = 4
+# minibatch_dict = {4: 128, 8: 64, 16: 32, 32: 16, 64: 8, 128: 4}
+# max_minibatch_per_gpu = {256: 2, 512: 2, 1024: 2}
+# G_lrate_dict = {256: 0.0015}
+# D_lrate_dict = {256: 0.0015}
+# total_kimg = 12000
 
 
 def train_cycle():
@@ -258,60 +281,44 @@ def train_cycle():
     BETA_2 = 0.99
     EPSILON = 1e-8
 
-    init_res = 32 #initial resolution
-    max_res = 256 #max res based on the dataset
+    parser = get_parser()
+    params = parser.parse_args()
+
+    multi_node = params.multi_node
+    use_gs = params.use_gs
+    datapath = params.datapath
+    outpath = params.outpath
+
+    init_res = params.init_res
+    max_res = params.max_res
+    change_model = params.change_model
     max_res_log2 = int(np.log2(max_res))
     num_replicas = 1
     curr_res_log2 = int(np.log2(init_res))
     prev_res = -1
 
-    change_model = False #if the model is increased based on resolution
-    
-    use_gpus = True
-    use_multi_gpus = False
-
-    #for 8 GPUS
-    lod_training_kimg = 300
-    lod_transition_kimg = 1500
-
-    minibatch_base = 32
-    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 64, 64: 64, 128: 32}
-    max_minibatch_per_gpu = {256: 16, 512: 8, 1024: 8}
+    lod_training_kimg = params.lod_training_kimg
+    lod_transition_kimg = params.lod_transition_kimg
+    minibatch_base = params.minibatch_base 
+    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 8, 64: 8, 128: 8}
+    max_minibatch_per_gpu = {256: 8, 512: 8, 1024: 8}
     G_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
     D_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
-    total_kimg = 12000
-
-    #for 4 GPUS
-    # lod_training_kimg = 300
-    # lod_transition_kimg = 1500
-
-    # minibatch_base = 16
-    # minibatch_dict = {4: 512, 8: 256, 16: 128, 32: 64, 64: 32, 128: 16}
-    # max_minibatch_per_gpu = {256: 8, 512: 4, 1024: 2}
-    # G_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
-    # D_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
-    # total_kimg = 12000
-
-    #for 1 GPU
-    # lod_training_kimg = 300
-    # lod_transition_kimg = 1500
-
-    # minibatch_base = 4
-    # minibatch_dict = {4: 128, 8: 64, 16: 32, 32: 16, 64: 8, 128: 4}
-    # max_minibatch_per_gpu = {256: 2, 512: 2, 1024: 2}
-    # G_lrate_dict = {256: 0.0015}
-    # D_lrate_dict = {256: 0.0015}
-    # total_kimg = 12000
+    total_kimg = params.total_kimg
 
     #training repeats
-    minibatch_repeats = 4
-    D_repeats = 1 #not used right now needs to separate discriminator and generator training 
-    n_epochs = 50
+    minibatch_repeats = params.minibatch_repeats
+    D_repeats = params.D_repeats
+    
+    use_gpus = True
+
+
+    #training repeats
     curr_image = 0
 
     #initialization of paths
     #tfrecord_dir = '/home/renato/dataset'
-    tfrecord_dir = '/home/renato/dataset/satimages'
+    tfrecord_dir = datapath #'/home/renato/dataset/satimages'
 
     start_init = time.time()
     f = [0.9, 0.1] # train, test fractions might be necessary
@@ -320,12 +327,25 @@ def train_cycle():
     net_size = init_res
 
     #start strategy
+    if multi_node:
+        workers = params.workers
+        index = params.index
+
+        print(multi_node)
+        print(workers)
+        print(index)
+
+        #tf_config
+        os.environ["TF_CONFIG"] = json.dumps({
+            'cluster': {'worker': workers},#["10.1.10.58:12345", "10.1.10.250:12345"]},
+            'task': {'type': 'worker', 'index': index}
+        })
     if use_gpus:
-        strategy = tf.distribute.MirroredStrategy()
-        use_stategy = True
-    elif use_multi_gpus:
-        strategy = tf.distribute.MirroredStrategy()
-        use_stategy = True
+        if not multi_node:
+            strategy = tf.distribute.MirroredStrategy()
+            use_stategy = True
+        if multi_node:
+            strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy(tf.distribute.experimental.CollectiveCommunication.NCCL)
     #elif use_tpu:
     else:
         use_stategy = False
@@ -341,7 +361,7 @@ def train_cycle():
                 #plot_model(gen, show_shapes=True, dpi=64)
                 disc = networks2.Combined_Discriminator(init_res, num_replicas = num_replicas) #choose resolution
                 #plot_model(disc, show_shapes=True, dpi=64)
-                cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=1024)
+                cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
                 cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
                 cvae.load_weights('saved_models/vae/cvae_models/cvae_Final.h5')
         else:
@@ -351,7 +371,7 @@ def train_cycle():
                 #plot_model(gen, show_shapes=True, dpi=64)
                 disc = networks2.Combined_Discriminator(256, num_replicas = num_replicas) #choose resolution
                 #plot_model(disc, show_shapes=True, dpi=64)
-                cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=1024)
+                cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
                 cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
                 cvae.load_weights('saved_models/vae/cvae_models/cvae_Final.h5')
     else:
@@ -360,7 +380,7 @@ def train_cycle():
             #plot_model(gen, show_shapes=True, dpi=64)
             disc = networks2.Combined_Discriminator(init_res) #choose resolution
             #plot_model(disc, show_shapes=True, dpi=64)
-            cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=1024)
+            cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
             cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
             cvae.load_weights('saved_models/vae/cvae_models/cvae_Final.h5')
         else:
@@ -368,7 +388,7 @@ def train_cycle():
             #plot_model(gen, show_shapes=True, dpi=64)
             disc = networks2.Combined_Discriminator(256) #choose resolution
             #plot_model(disc, show_shapes=True, dpi=64)
-            cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=1024)
+            cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
             cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
             cvae.load_weights('saved_models/vae/cvae_models/cvae_Final.h5')
 
@@ -558,11 +578,13 @@ def train_cycle():
                 gen.save_weights('generator.h5')
                 gen = networks2.generator(resolution)
                 gen.load_weights('generator.h5', by_name=True)
+                os.remove('generator.h5') 
 
                 disc.save_weights('discriminator.h5')
                 disc = networks2.Combined_Discriminator(resolution)
                 disc.built = True
                 disc.load_weights('discriminator.h5', by_name=True)
+                os.remove('discriminator.h5') 
             
             elif prev_res != -1 and not change_model:
                 if use_stategy:
@@ -570,11 +592,13 @@ def train_cycle():
                         gen.save_weights('generator.h5')
                         gen = networks2.generator(256, num_replicas = num_replicas)
                         gen.load_weights('generator.h5', by_name=True)
+                        os.remove('generator.h5') 
 
                         disc.save_weights('discriminator.h5')
                         disc = networks2.Combined_Discriminator(256, num_replicas = num_replicas)
                         disc.built = True
                         disc.load_weights('discriminator.h5', by_name=True)
+                        os.remove('discriminator.h5') 
 
             #optimizer learning rate (and reset?)
 
@@ -620,138 +644,20 @@ def train_cycle():
 
         if curr_image % (global_batch_size * 10000) == 0:
             # save model
-            gen.save_weights('saved_models/generator_'+str(int(curr_image/1000))+'.h5')
-            disc.save_weights('saved_models/discriminator_'+str(int(curr_image/1000))+'.h5')
-            pickle.dump({'gen_loss': gen_loss_train, 'disc_loss': disc_loss_train, 'global_loss': global_loss_train, 'local_loss': local_loss_train}, open('losses.pkl', 'wb'))
+            gen.save_weights(outpath+'saved_models/generator_'+str(int(curr_image/1000))+'.h5')
+            disc.save_weights(outpath+'saved_models/discriminator_'+str(int(curr_image/1000))+'.h5')
+            pickle.dump({'gen_loss': gen_loss_train, 'disc_loss': disc_loss_train, 'global_loss': global_loss_train, 'local_loss': local_loss_train}, open(outpath+'losses.pkl', 'wb'))
             print('Model Saved')
         
         curr_image += global_batch_size
 
-    gen.save_weights('generator_Final.h5')
-    disc.save_weights('discriminator_Final.h5')
+    gen.save_weights(outpath+'generator_Final.h5')
+    disc.save_weights(outpath+'discriminator_Final.h5')
     return
 
-def get_image(imgi):
-    filename = 'cond4/'+str(imgi)+'.png'
-    if os.path.isfile(filename):
-        im=Image.open(filename)
-        im.load()
-        im = np.asarray(im, dtype=np.float32 )
-        im=np.transpose(im, (2, 0, 1))
-
-    return im
-
-def generate_image(gen, img, saveloc, fullsize, lod_in=0.0):
-    drange_net              = [-1,1]       # Dynamic range used when feeding image data to the networks.
-    size= int(fullsize / 2)
-    drange_data = [0, fullsize-1]
-
-    grid_reals = np.zeros((1, 3, 256, 256))
-    grid_reals[0] = img
 
 
-    #generate latent with concatenation
-    real1= grid_reals[:,:, :(size),:(size)]
-    real2= grid_reals[:,:, (size):,:(size)]
-    real3= grid_reals[:,:, :(size),(size):]
-    real1=(real1.astype(np.float32)-127.5)/127.5
-    real2=(real2.astype(np.float32)-127.5)/127.5
-    real3=(real3.astype(np.float32)-127.5)/127.5
-    print('real3 shape' + str(real3.shape))
-    latents = np.random.randn(1, 3, 128, 128)
-    left = np.concatenate((real1, real2), axis=2)
-    right = np.concatenate((real3, latents), axis=2)
-    lat_and_cond = np.concatenate((left, right), axis=3)
-
-
-    # Conditional GAN Loss
-    # real1= grid_reals[:,:, :(size),:(size)]
-    # real2= grid_reals[:,:, (size):,:(size)]
-    # real3= grid_reals[:,:, :(size),(size):]
-    # real4= grid_reals[:,:, :(size), :(size)]
-    
-   
-    # #generate fakes
-    # latents = tf.random.normal([1, 3, size, size])
-    # left = tf.concat([real1, real2], axis=2)
-    # right = tf.concat([real3, latents], axis=2)
-    # lat_and_cond = tf.concat([left, right], axis=3)
-
-
-    #generate 128x128 image
-    fake_images_out_small = gen([lat_and_cond, lod_in], training=False)
-    fake_images_out_small = fake_images_out_small.numpy()
-
-
-    #concatenate generated image with real images
-    fake_image_out_right =np.concatenate((real3, fake_images_out_small), axis=2)
-    fake_image_out_left = np.concatenate((real1, real2), axis=2)
-    grid_fakes = np.concatenate((fake_image_out_left, fake_image_out_right), axis=3)
-
-    #grid_fakes = grid_fakes.numpy()
-
-    #print(grid_fakes)
-    grid_fakes = grid_fakes[0]
-
-
-    image = grid_fakes.transpose(1, 2, 0) # CHW -> HWC
-
-    image = adjust_dynamic_range(image, drange_net, drange_data)
-    image = np.rint(image).clip(0, 255).astype(np.uint8)
-    format = 'RGB' if image.ndim == 3 else 'L'
-    image = Image.fromarray(image, format).save(saveloc)
-
-    return
-
-def snapshot(n_images=1, save=False):
-    #tfrecord_dir = '/home/renato/dataset/satimages'
-    tfrecord_dir =  '/eos/user/r/redacost/progan/tfrecords1024/'
-    tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir, '*.tfrecords')))
-    minibatch_base = 32
-    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 64, 64: 64, 128: 32}
-    max_minibatch_per_gpu = {256: 16, 512: 8, 1024: 8}
-    dataset_list, batch_sizes_list = get_dataset(tfr_files, num_gpus=1, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu)
-    lod_dataset = 0
-    dataset = dataset_list[lod_dataset]
-    print(dataset)
-    #(train, val, test) = tfds.load("eurosat/rgb", split=["train[:100%]", "train[80%:90%]", "train[90%:]"])
-
-    # def prepare_training_data(datapoint):
-    #     input_image = datapoint["image"]
-    #     data = tf.transpose(input_image, [2,0,1])
-    #     return data
-
-    # dataset = train.map(prepare_training_data, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-
-
-    dataset_iter = iter(dataset)
-    images = []
-
-    # for el in dataset.take(n_images):
-    #     images.append(el.numpy()[0])
-    #     #print(repr(el))
-
-
-    for _ in range(n_images):
-        dataset_el = tf.cast(next(dataset_iter).numpy()[0], tf.float32) 
-        #image = (dataset.transpose(1, 2, 0).astype(np.float32)-127.5)/127.5
-        #image = adjust_dynamic_range(dataset_el, [0, 255], [-1,1])
-        #image = np.rint(image).clip(0, 255).astype(np.uint8)
-        images.append(dataset_el)
-
-    #print(dataset)
-
-    #image = (dataset.transpose(1, 2, 0).astype(np.float32)-127.5)/127.5
-
-    #image = adjust_dynamic_range(image, [-1,1], [0, 255])
-    #image = np.rint(image).clip(0, 255).astype(np.uint8)
-    if save:
-        format = 'RGB' #if image.ndim == 3 else 'L'
-        image = Image.fromarray(dataset, format).save('img.png')
-    
-    return images
-
-def encoder_train_cycle(lr=0.0005):
+def encoder_train_cycle(lr=0.00005):
     #initialization of variables
     #BETA_1 = 0.0
     #BETA_2 = 0.99
@@ -765,7 +671,7 @@ def encoder_train_cycle(lr=0.0005):
  
 
     #training repeats
-    n_epochs = 500
+    n_epochs = 300
 
     #initialization of paths
     #tfrecord_dir = '/home/renato/dataset'
@@ -796,7 +702,7 @@ def encoder_train_cycle(lr=0.0005):
         global_batch_size = 32 * num_replicas
         print('Global batch size: ' + str(global_batch_size))
         with strategy.scope():
-            cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=1024)
+            cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
     else:
         cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=128)
 
@@ -887,6 +793,7 @@ def encoder_train_cycle(lr=0.0005):
 
             reconstruction_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, reconstruction_loss, axis=None)
             kl_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, kl_loss, axis=None)
+            #rgb_angle = strategy.reduce(tf.distribute.ReduceOp.SUM, rgb_angle, axis=None)
 
             return reconstruction_loss, kl_loss
     else:
@@ -894,7 +801,6 @@ def encoder_train_cycle(lr=0.0005):
         def training_step_tf_fuction(dataset):
             reconstruction_loss, kl_loss = training_step(next(dataset),)
             return reconstruction_loss, kl_loss
-
         
     train_time = time.time()      
 
@@ -922,13 +828,14 @@ def encoder_train_cycle(lr=0.0005):
 
         # save model
         if epoch % 10 == 0:
-            #cvae.save_weights('saved_models/vae/cvae_'+str(int(epoch))+'.h5')
+            cvae.save_weights('saved_models/vae/cvae_'+str(int(epoch))+'.h5')
             grid = construct_grid_to_save(gw, gh, reals, fakes, grid, model=cvae, step=epoch)
             save_grid(gw, gh,grid, step=epoch)
             # print('Model Saved')
             print(time.time() - train_time )
             print('Reconstruction Loss ' + str(reconstruction_loss.numpy()))
             print('Kl Loss ' + str(kl_loss.numpy()))
+            #print('rgb_angle ' + str(rgb_angle.numpy())) 
         pickle.dump({'reconstruction_loss': reconstruction_loss_train, 'kl_loss': kl_loss_train}, open('saved_models/vae/losses_'+str(lr)+'.pkl', 'wb'))
         
 
@@ -940,277 +847,32 @@ def encoder_train_cycle(lr=0.0005):
 
     return cvae #total_loss
 
-def generate_decoded_image(model = None):
-    drange_net  = [-1,1]       # Dynamic range used when feeding image data to the networks.
-    drange_data = [0, 256-1]
-
-    a = np.zeros((1, 3, 256, 256))
-    size = 128
-    a4= a[:,:, :(size), :(size)]
-    imgi = 1
-
-    filename = 'cond4/'+str(imgi)+'.png'
-    #filename = 'img.png'
-    if os.path.isfile(filename):
-        im=Image.open(filename)
-        im.load()
-        im = np.asarray(im, dtype=np.float32 )
-        im= np.transpose(im, (2, 0, 1))
-
-    batch = np.zeros((1, 3, 256, 256))
-    batch[0] = im
+def get_parser():
+    parser = argparse.ArgumentParser(description='Progressive GAN Params')
+    parser.add_argument('--multi_node', action='store', default=False)
+    parser.add_argument('--workers', nargs='+', default='') #use like this --workers 10.1.10.58:12345 10.1.10.250:12345
+    parser.add_argument('--index', action='store', type=int, default=0)
+    parser.add_argument('--use_gs', action='store', default=False)
+    parser.add_argument('--datapath', action='store', default='') #'/eos/user/r/redacost/progan/tfrecords1024/'
+    parser.add_argument('--outpath', action='store', default='')
+    #
+    parser.add_argument('--init_res', action='store', type=int, default=32, help='initial resolution of the progressive gan')
+    parser.add_argument('--max_res', action='store', type=int, default=256, help='maximum resolution based on the dataset')
+    parser.add_argument('--change_model', action='store', default=False, help='if the model is increased based on resolution, as the model is now this is always false')
+    #
+    parser.add_argument('--lod_training_kimg', action='store', type=int, default=300)
+    parser.add_argument('--lod_transition_kimg', action='store', type=int, default=1500)
+    parser.add_argument('--minibatch_base', action='store', type=int, default=32)
+    #parser.add_argument('--minibatch_dict', action='store', type=int, default=64)
+    #parser.add_argument('--max_minibatch_per_gpu', action='store', type=int, default=64)
+    #parser.add_argument('--G_lrate_dict', action='store', type=int, default=64)
+    #parser.add_argument('--D_lrate_dict', action='store', type=int, default=64)
+    parser.add_argument('--total_kimg', action='store', type=int, default=1200)
+    parser.add_argument('--minibatch_repeats', action='store', type=int, default=4)
+    parser.add_argument('--D_repeats', action='store', type=int, default=1)
     
-
-    batch1= batch[:,:, :(size),:(size)]
-    batch2= batch[:,:, (size):,:(size)]
-    batch3= batch[:,:, :(size),(size):]
-    batch4= batch[:,:, :(size), :(size)]
-
-    # batch1=(batch1.astype(np.float32))/255
-    # batch2=(batch2.astype(np.float32))/255
-    # batch3=(batch3.astype(np.float32))/255
-
-    #batchleft = tf.concat([batch1, batch2], axis=3)
-    #batchall3 = tf.concat([batchleft, batch3], axis=3)
-
-    if model != None:
-        cvae = model
-    else:
-        cvae = networks2.CVAE(resolution=256, base_filter=8, latent_dim=256)
-        cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
-        cvae.load_weights('saved_models/vae/cvae_Final.h5')
-    latent = cvae.encode(batch1)
-    #z = cvae.reparameterize(mean, logvar)
-    predictions = cvae.decode(latent)
-    predictions = predictions.numpy()
-
-    #predictionsleft = predictions[:,:, :(size), :(size)]
-    #predictionsmiddle = predictions[:,:, :(size), (size):2*(size)]
-    #predictionsright = predictions[:,:, :(size), 2*(size):3*(size)]
-
-    #fake_image_out_right =np.concatenate((predictionsright, a4), axis=2)
-    #fake_image_out_left = np.concatenate((predictionsleft, predictionsmiddle), axis=2)
-    #grid_fakes = np.concatenate((fake_image_out_left, fake_image_out_right), axis=3)
-
-    grid_fakes = predictions[0]
-
-    image = grid_fakes.transpose(1, 2, 0) # CHW -> HWC
-
-    #image = adjust_dynamic_range(image, drange_net, drange_data)
-    image = np.rint(image).clip(0, 255).astype(np.uint8)
-    format = 'RGB' if image.ndim == 3 else 'L'
-    image = Image.fromarray(image, format).save('saved_models/vae/decodedimg.png')
-
-    return
-    
-#optuna optimization    
-def objective(trial):
-    lr = trial.suggest_float("learning_rate_init", 1e-5, 1e-3, log=True)
-
-    loss = encoder_train_cycle(lr)
-
-    return loss
-
-def print_best_callback(study, trial):
-    print(f"Best value: {study.best_value}, Best params: {study.best_trial.params}")
-
-def setup_image_grid(dataset_shape, m_size= '1080p', is_ae=True):
-
-    # Select size
-    gw = 1; gh = 1
-    if m_size == '1080p':
-        gw = np.clip(1920 // dataset_shape[2], 3, 32)
-        gw = gw - (gw % 2)
-        gh = np.clip(1080 // dataset_shape[1], 2, 32)
-    if m_size == '4k':
-        gw = np.clip(3840 // dataset_shape[2], 7, 32)
-        gw = gw - (gw % 2)
-        gh = np.clip(2160 // dataset_shape[1], 4, 32)
-
-    size = dataset_shape[2]
-
-    if is_ae:
-
-        images = snapshot(n_images=int((gw / 2)) * gh, save=False)
-
-        # Fill in reals and labels.
-        reals = np.zeros([int((gw / 2) * gh)] + dataset_shape, dtype=np.float32)
-        fakes = np.zeros([int((gw / 2) * gh)] + dataset_shape, dtype=np.float32)
-        grid = np.zeros([gw * gh] + dataset_shape, dtype=np.float32)
-        for idx in range(gw * gh):
-            x = idx % gw; y = idx // gw
-            if idx % 2 == 0:
-                real = images[idx//2]
-                grid[idx] = real[:, :(size),:(size)]
-                reals[int(idx // 2)] = real[:, :(size),:(size)]
-            if idx % 2 == 1:
-                grid[idx] = fakes[0]
-
-        # Generate latents.
-        return gw, gh, reals, fakes, grid
-
-    else:
-        size = int(size / 2)
-
-        images = snapshot(n_images=int(gw * gh), save=False)
-
-        # Fill in reals and labels.
-        reals = np.zeros([int(gw * gh)] + dataset_shape, dtype=np.float32)
-        fakes = np.zeros([int((gw / 2) * gh)] + dataset_shape, dtype=np.float32)
-        grid = np.zeros([gw * gh] + dataset_shape, dtype=np.float32)
-        for idx in range(gw * gh):
-            real = images[idx]
-
-            corner1= real[:, :(size),:(size)]
-            corner2= real[:, (size):,:(size)]
-            corner3= real[:, :(size),(size):]
-            corner4= np.zeros([3, 128, 128])
-
-            image_right = tf.concat([corner3, corner4], axis=1)
-            image_left = tf.concat([corner1, corner2], axis=1)
-            image_full = tf.concat([image_left, image_right], axis=2)
-
-            grid[idx] = image_full
-            reals[idx] = real
-
-        # Generate latents.
-        return gw, gh, reals, fakes, grid
-
-def construct_grid_to_save(gw, gh, reals, fakes, grid, model=None, step=0):
-    size=128
-    if model != None:
-        cvae = model
-    else:
-        cvae = networks2.CVAE(resolution=256, base_filter=8, latent_dim=256)
-        cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
-        cvae.load_weights('saved_models/vae/cvae_Final.h5')
-    for idx in range(gw * gh):
-        x = idx % gw; y = idx // gw
-        if idx % 2 == 0:
-            continue
-        if idx % 2 == 1:
-            im= reals[idx // 2]
-            im = adjust_dynamic_range(im, [0,255], [-1,1])
-            #im= im[:,:, :(size),:(size)]
-            #im= np.transpose(im, (2, 0, 1))
-
-            batch = np.zeros((1, 3, size, size))
-            batch[0] = im
-            #batch = batch[:,:, :(size),:(size)]
-
-            latent = cvae.encode(batch)
-            #z = cvae.reparameterize(mean, logvar)
-            predictions = cvae.decode(latent)
-            predictions = predictions.numpy()
-
-            grid_fakes = predictions[0]
-
-            grid_fakes = adjust_dynamic_range(grid_fakes, [-1,1], [0,255])
-
-            grid[idx] = grid_fakes#.transpose(1, 2, 0) # CHW -> HWC
-
-        #image = adjust_dynamic_range(image, drange_net, drange_data)
-
-    grid_to_save = []
-
-    for el in grid:
-        #gridi = el.transpose(1, 2, 0) 
-        grid_to_save.append(el)
-
-    return grid_to_save
-
-def construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=None, gen_model=None, lod_in=0.0):
-    size=128
-    for idx in range(gw * gh):
-        x = idx % gw; y = idx // gw
-        
-        im= reals[idx]
-        im = adjust_dynamic_range(im, [0,255], [-1,1])
-        #im= im[:,:, :(size),:(size)]
-        #im= np.transpose(im, (2, 0, 1))
-
-        batch = np.zeros((1, 3, 256, 256))
-        batch[0] = im
-        #batch = batch[:,:, :(size),:(size)]
-
-
-        corner1= batch[:,:, :(size),:(size)]
-        corner2= batch[:,:, (size):,:(size)]
-        corner3= batch[:,:, :(size),(size):]
-
-
-        noise_shape = 512
-
-         #generate noise image
-        latents = tf.random.normal([1, noise_shape])
-
-        ae_latent1 = cvae_model.encode(corner1)
-        ae_latent2 = cvae_model.encode(corner2)
-        ae_latent3 = cvae_model.encode(corner3)
-
-        #check axis
-        ae_latent_left = tf.concat([ae_latent1, ae_latent2], axis=1)
-        ae_latents = tf.concat([ae_latent_left, ae_latent3], axis=1)
-
-        corner4 = tf.cast(gen_model([latents, ae_latents, lod_in], training=False), tf.float32) 
-
-        image_right = tf.cast(tf.concat([corner3, corner4], axis=2), tf.float32)
-        image_left = tf.cast(tf.concat([corner1, corner2], axis=2), tf.float32)
-        image_full = tf.concat([image_left, image_right], axis=3)
-
-        predictions = image_full.numpy()
-
-        grid_fakes = predictions[0]
-
-        grid_fakes = adjust_dynamic_range(grid_fakes, [-1,1], [0,255])
-
-        grid[idx] = grid_fakes#.transpose(1, 2, 0) # CHW -> HWC
-
-        #image = adjust_dynamic_range(image, drange_net, drange_data)
-
-    grid_to_save = []
-
-    for el in grid:
-        #gridi = el.transpose(1, 2, 0) 
-        grid_to_save.append(el)
-
-    return grid_to_save
-
-def save_grid(gw, gh,grid,dataset_shape=None,step=0):
-    num, img_w, img_h = len(grid), grid[0].shape[2], grid[0].shape[1]
-    #print(num, img_w, img_h)
-
-
-    save_grid = np.zeros([grid[0].shape[0]] + [gh * img_h, gw * img_w], dtype=np.float32)
-    for idx in range(num):
-        x = (idx % gw) * img_w
-        y = (idx // gw) * img_h
-        save_grid[..., y : y + img_h, x : x + img_w] = grid[idx]
-
-    image = save_grid.transpose(1, 2, 0) 
-    image = np.rint(image).clip(0, 255).astype(np.uint8)
-    format = 'RGB'
-    image = Image.fromarray(image, format).save('saved_models/vae/snapshots/grid_'+str(step)+'.png')
-
-    return save_grid
-
-def save_grid_pgan(gw, gh,grid,dataset_shape=None,step=0):
-    num, img_w, img_h = len(grid), grid[0].shape[2], grid[0].shape[1]
-    #print(num, img_w, img_h)
-
-
-    save_grid = np.zeros([grid[0].shape[0]] + [gh * img_h, gw * img_w], dtype=np.float32)
-    for idx in range(num):
-        x = (idx % gw) * img_w
-        y = (idx // gw) * img_h
-        save_grid[..., y : y + img_h, x : x + img_w] = grid[idx]
-
-    image = save_grid.transpose(1, 2, 0) 
-    image = np.rint(image).clip(0, 255).astype(np.uint8)
-    format = 'RGB'
-    image = Image.fromarray(image, format).save('saved_models/pgan/snapshots/grid_'+str(step)+'.png')
-
-    return save_grid
+    #parser.add_argument('--do_profiling', action='store', default=False)
+    return parser
 
 
 
@@ -1223,13 +885,13 @@ if __name__ == "__main__":
         tf.config.experimental.set_memory_growth(gpu, True)
     #np.random.seed(1000)
     #tf.random.set_seed(np.random.randint(1 << 31))
-    # train_cycle()
+    train_cycle()
 #    gen = networks.named_generator_model(256)
 #    gen.load_weights('generator_Final.h5', by_name=True)
 #    image = get_image(1)
 #    generate_image(gen, image, 'fakeimg.png', 256, lod_in=0.0)
-    model = encoder_train_cycle(lr=8.5e-5)
-    generate_decoded_image(model)
+    #model = encoder_train_cycle(lr=8.5e-5)
+    #generate_decoded_image(model)
     #study = optuna.create_study()
     #study.optimize(objective, n_trials=100, callbacks=[print_best_callback])
     #gw, gh, reals, fakes, grid = setup_image_grid([3,128,128],  m_size = '1080p')
