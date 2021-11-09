@@ -869,7 +869,7 @@ def get_parser():
     #parser.add_argument('--max_minibatch_per_gpu', action='store', type=int, default=64)
     #parser.add_argument('--G_lrate_dict', action='store', type=int, default=64)
     #parser.add_argument('--D_lrate_dict', action='store', type=int, default=64)
-    parser.add_argument('--total_kimg', action='store', type=int, default=1200)
+    parser.add_argument('--total_kimg', action='store', type=int, default=12000)
     parser.add_argument('--minibatch_repeats', action='store', type=int, default=4)
     parser.add_argument('--D_repeats', action='store', type=int, default=1)
 
