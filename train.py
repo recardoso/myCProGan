@@ -16,7 +16,7 @@ from snapshots import *
 
 from tensorflow.keras.optimizers import Adam
 
-from tensorflow.keras.utils import to_categorical, plot_model
+#from tensorflow.keras.utils import to_categorical, plot_model
 #import tensorflow_datasets as tfds
 
 from PIL import Image
@@ -59,23 +59,68 @@ def process_reals(x, lod, mirror_augment, drange_data, drange_net):
     y = tf.reshape(y, [-1, s[1], s[2], s[3]])
     x = lerp(x, y, lod - tf.floor(lod))
 
-    # Upscale to match the expected input/output size of the networks. 256x256
-    s = tf.shape(x)
-    factor = tf.cast(2 ** tf.floor(lod), tf.int32)
-    x = tf.reshape(x, [-1, s[1], s[2], 1, s[3], 1])
-    x = tf.tile(x, [1, 1, 1, factor, 1, factor])
-    x = tf.reshape(x, [-1, s[1], s[2] * factor, s[3] * factor])
-    #tf.print(tf.shape(x))
+    # Upscale to match the expected input/output size of the networks. 256x256 only useful if we are not changing the model
+    # s = tf.shape(x)
+    # factor = tf.cast(2 ** tf.floor(lod), tf.int32)
+    # x = tf.reshape(x, [-1, s[1], s[2], 1, s[3], 1])
+    # x = tf.tile(x, [1, 1, 1, factor, 1, factor])
+    # x = tf.reshape(x, [-1, s[1], s[2] * factor, s[3] * factor])
+    # tf.print(tf.shape(x))
     return x
 
 def process_reals_cvae(x, drange_data, drange_net):
     x = tf.cast(x, tf.float32)
+
+#     x = tf.clip_by_value(x, 50, 150)
+#     x =  (x - 50)*(((250-0)//(150-50))+0)
+
+#     hist = tf.histogram_fixed_width(x, [0,256], nbins=256)
+#     tf.math.cumsum(hist)
+#     h = np.round((r_cdf - r_cdf[0]) / (256*256 - r_cdf[0]) * 255)
+#     r_test_image[i] = h[el]
+
+
     x = adjust_dynamic_range(x, drange_data, drange_net)
 
     return x
 
 #----------------------------------------------------------------------------
 # Dataset Reading and Processing
+
+def retrieve_balanced_tfrecords(recorddatapaths, batch_size):
+    recorddata = tf.data.TFRecordDataset(recorddatapaths, num_parallel_reads=tf.data.experimental.AUTOTUNE)
+
+
+    retrieveddata = {
+        'images': tf.io.FixedLenSequenceFeature((), dtype=tf.int64, allow_missing=True), #float32
+    }
+
+    def _parse_function(example_proto):
+        # Parse the input `tf.Example` proto using the dictionary above.
+        data = tf.io.parse_single_example(example_proto, retrieveddata)
+        #data['images'] = tf.reshape(data['images'],[3,256,256])
+        #rgb_image = [data['images'],data['images'],data['images']]
+        #data['images'] = rgb_image
+        #data = tf.io.decode_raw(data['images'], tf.uint8)
+        return tf.reshape(data['images'], [3,256,256])
+        #return data['images']
+
+    parsed_dataset = recorddata.map(_parse_function, num_parallel_calls=tf.data.experimental.AUTOTUNE).cache().shuffle(38472).repeat().batch(batch_size, drop_remainder=True)#.with_options(options)
+   
+    return parsed_dataset#, ds_size
+
+def _parse_function_balanced(example_proto):
+        retrieveddata = {
+            'images': tf.io.FixedLenSequenceFeature((), dtype=tf.string), #float32
+        }
+        # Parse the input `tf.Example` proto using the dictionary above.
+        data = tf.io.parse_single_example(example_proto, retrieveddata)
+        #data['images'] = tf.reshape(data['images'],[3,256,256])
+        #rgb_image = [data['images'],data['images'],data['images']]
+        #data['images'] = rgb_image
+        data = tf.io.decode_raw(data['images'], tf.uint8)
+        return tf.reshape(data, [3,256,256])
+        #return data['images']
 
 def parse_tfrecord_tf(record):
     features = tf.io.parse_single_example(record, features={
@@ -84,6 +129,14 @@ def parse_tfrecord_tf(record):
     #data = tf.io.decode_raw(features['data'], tf.uint8)
     data = tf.io.decode_raw(features['data'], tf.uint8)
     return tf.reshape(data, features['shape'])
+
+def parse_tfrecord_tf_floods(record):
+    features = tf.io.parse_single_example(record, features={
+        'shape': tf.io.FixedLenFeature([2], tf.int64),
+        'data': tf.io.FixedLenFeature([], tf.string)})
+    #data = tf.io.decode_raw(features['data'], tf.uint8)
+    data = tf.io.decode_raw(features['data'], tf.uint8)
+    return tf.expand_dims(tf.reshape(data, features['shape']), axis=0)
 
 def parse_tfrecord_tf_eurosat(record):
     features = tf.io.parse_single_example(record, features={
@@ -102,7 +155,10 @@ def parse_tfrecord_np(record):
     ex.ParseFromString(record.numpy())
     shape = ex.features.feature['shape'].int64_list.value
     data = ex.features.feature['data'].bytes_list.value[0]
-    return np.fromstring(data, np.uint8).reshape(shape)
+    if len(shape)==2:
+        return np.expand_dims(np.fromstring(data, np.uint8).reshape(shape), axis=0)
+    else:
+        return np.fromstring(data, np.uint8).reshape(shape)
 
 def determine_shape(tfr_files, resolution = None):
     tfr_shapes = []
@@ -113,7 +169,7 @@ def determine_shape(tfr_files, resolution = None):
             tfr_shapes.append(parse_tfrecord_np(record).shape)
             break
 
-
+            
     # Determine shape and resolution.
     max_shape = max(tfr_shapes, key=lambda shape: np.prod(shape))
     resolution = resolution if resolution is not None else max_shape[1]
@@ -129,6 +185,7 @@ def determine_shape(tfr_files, resolution = None):
 
 #creates a dataset for each lod (level of detail)
 def get_dataset(tfr_files,      # Directory containing a collection of tfrecords files.
+    flood= False,
     minibatch_base  = 16,
     minibatch_dict  = {},
     max_minibatch_per_gpu = {},
@@ -170,9 +227,12 @@ def get_dataset(tfr_files,      # Directory containing a collection of tfrecords
 
 
         #get dataset
-        dset = tf.data.TFRecordDataset(tfr_file, compression_type='', buffer_size=buffer_mb<<20)
+        dset = tf.data.TFRecordDataset(tfr_file)#, compression_type='', buffer_size=buffer_mb<<20)
         #use parse function
-        dset = dset.map(parse_tfrecord_tf, num_parallel_calls=num_threads)
+        if flood:
+            dset = dset.map(parse_tfrecord_tf_floods, num_parallel_calls=num_threads)
+        else:
+            dset = dset.map(parse_tfrecord_tf, num_parallel_calls=num_threads)
 
         #join with labels
         #dset = tf.data.Dataset.zip((dset, self._tf_labels_dataset))
@@ -193,6 +253,8 @@ def get_dataset(tfr_files,      # Directory containing a collection of tfrecords
         _tf_batch_sizes[tfr_lod] = int(batch_size)
 
     #iterator = iter(dset)
+    
+    print(_tf_batch_sizes)
 
     print('Dataset Read')
 
@@ -302,11 +364,12 @@ def train_cycle():
     lod_training_kimg = params.lod_training_kimg
     lod_transition_kimg = params.lod_transition_kimg
     minibatch_base = params.minibatch_base 
-    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: dict_batch_size, 64: dict_batch_size, 128: dict_batch_size}
+    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: dict_batch_size*8, 64: dict_batch_size*4, 128: dict_batch_size*2}
     max_minibatch_per_gpu = {256: dict_batch_size, 512: 8, 1024: 8}
     G_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
     D_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
     total_kimg = params.total_kimg
+    load = params.load
 
     #training repeats
     minibatch_repeats = params.minibatch_repeats
@@ -320,7 +383,8 @@ def train_cycle():
 
     #initialization of paths
     #tfrecord_dir = '/home/renato/dataset'
-    tfrecord_dir = datapath #'/home/renato/dataset/satimages'
+    tfrecord_dir_train = datapath + '/train_floods' #'/home/renato/dataset/satimages'
+    tfrecord_dir_test = datapath + '/test_floods' #'/home/renato/dataset/satimages'
 
     start_init = time.time()
     f = [0.9, 0.1] # train, test fractions might be necessary
@@ -359,13 +423,13 @@ def train_cycle():
         num_replicas = strategy.num_replicas_in_sync
         if change_model:
             with strategy.scope():
-                gen = networks2.generator(init_res, num_replicas = num_replicas) #choose resolution
+                gen = networks2.generator(init_res, num_channels=1, num_replicas = num_replicas) #choose resolution
                 #plot_model(gen, show_shapes=True, dpi=64)
-                disc = networks2.Combined_Discriminator(init_res, num_replicas = num_replicas) #choose resolution
+                disc = networks2.Combined_Discriminator(init_res, num_channels=1, num_replicas = num_replicas) #choose resolution
                 #plot_model(disc, show_shapes=True, dpi=64)
-                cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
+                cvae = networks2.CVAE(resolution=init_res, base_filter=int(32*(256/init_res)),latent_dim=2048, num_channels=1)
                 cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
-                cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final.h5')
+                cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final_'+str(init_res)+'.h5')
         else:
             with strategy.scope():
                 gen = networks2.generator(256, num_replicas = num_replicas)
@@ -382,9 +446,9 @@ def train_cycle():
             #plot_model(gen, show_shapes=True, dpi=64)
             disc = networks2.Combined_Discriminator(init_res) #choose resolution
             #plot_model(disc, show_shapes=True, dpi=64)
-            cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
+            cvae = networks2.CVAE(resolution=init_res, base_filter=int(32*(256/init_res)),latent_dim=512)
             cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
-            cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final.h5')
+            cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final_'+str(init_res)+'.h5')
         else:
             gen = networks2.generator(256) #choose resolution
             #plot_model(gen, show_shapes=True, dpi=64)
@@ -397,20 +461,28 @@ def train_cycle():
     #D_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
     #G_optimizer = Adam(learning_rate=LR, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
 
-    #load data
-    tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir, '*.tfrecords')))
-    dataset_list, batch_sizes_list = get_dataset(tfr_files, num_gpus=num_replicas, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu) #all the images for all the lods
+    #load train data
+    tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir_train, '*.tfrecords')))
+    dataset_list, batch_sizes_list = get_dataset(tfr_files, flood=True, num_gpus=num_replicas, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu) #all the images for all the lods
     if use_stategy:
-        distributed_dataset = {}
+        distributed_dataset_train = {}
         for key, value in dataset_list.items():
-            distributed_dataset[key] = strategy.experimental_distribute_dataset(value)
+            distributed_dataset_train[key] = strategy.experimental_distribute_dataset(value)
+            
+    #load test data        
+    tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir_test, '*.tfrecords')))
+    dataset_list, batch_sizes_list = get_dataset(tfr_files, flood=True, num_gpus=num_replicas, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu) #all the images for all the lods
+    if use_stategy:
+        distributed_dataset_test = {}
+        for key, value in dataset_list.items():
+            distributed_dataset_test[key] = strategy.experimental_distribute_dataset(value)
 
     #do any necessary data processing
 
     # Start training
     epoch_start = time.time()
 
-    def training_step(batch, lod_in_value):
+    def training_step(train_batch, test_batch, lod_in_value):
 
         #lod_in = tf.constant([[lod_in_value]])
         #lod_in = tf.constant(lod_in_value, shape=(num_replicas, 1))
@@ -419,81 +491,108 @@ def train_cycle():
         drange_net = [-1,1]
         drange_data = [0, 255]
 
-        batch = process_reals(batch, lod_in_value, mirror_augment, drange_data, drange_net)
+        train_batch = process_reals(train_batch, lod_in_value, mirror_augment, drange_data, drange_net)
+        test_batch = process_reals(test_batch, lod_in_value, mirror_augment, drange_data, drange_net)
         #return batch
 
-        gen_loss = loss.Generator_loss(gen, disc, cvae, batch, batch_size, G_optimizer, lod_in=lod_in, training_set=None, cond_weight = 1.0, network_size=net_size, global_batch_size = global_batch_size)
-        disc_loss, global_loss, local_loss = loss.combined_Discriminator_loss(gen, disc, cvae, batch, batch_size, D_optimizer, lod_in=lod_in, training_set=None, labels=None, wgan_lambda = 10.0, wgan_epsilon = 0.001, wgan_target = 1.0, cond_weight = 1.0,  network_size=net_size, global_batch_size = global_batch_size)  
+        gen_loss = loss.Generator_loss(gen, disc, cvae, train_batch, batch_size, G_optimizer, lod_in=lod_in, training_set=None, cond_weight = 1.0, network_size=net_size, global_batch_size = global_batch_size)
+        
+        disc_loss, global_loss, local_loss = loss.combined_Discriminator_loss(gen, disc, cvae, train_batch, batch_size, D_optimizer, lod_in=lod_in, training_set=None, labels=None, wgan_lambda = 10.0, wgan_epsilon = 0.001, wgan_target = 1.0, cond_weight = 1.0,  network_size=net_size, global_batch_size = global_batch_size)  
 
         #gen_loss = loss.original_Generator_loss(gen, disc, batch, batch_size, G_optimizer, lod_in=lod_in, training_set=None, cond_weight = 1.0, network_size=net_size, global_batch_size = global_batch_size)
         #disc_loss = loss.original_Discriminator_loss(gen, disc, batch, batch_size, D_optimizer, lod_in=lod_in, training_set=None, labels=None, wgan_lambda = 10.0, wgan_epsilon = 0.001, wgan_target = 1.0, cond_weight = 1.0,  network_size=net_size, global_batch_size = global_batch_size)
+        
+        gen_test_loss = loss.Generator_test_loss(gen, disc, cvae, test_batch, batch_size, G_optimizer, lod_in=lod_in, training_set=None, cond_weight = 1.0, network_size=net_size, global_batch_size = global_batch_size)
+        
+        disc_test_loss, global_test_loss, local_test_loss = loss.combined_Discriminator_test_loss(gen, disc, cvae, test_batch, batch_size, D_optimizer, lod_in=lod_in, training_set=None, labels=None, wgan_lambda = 10.0, wgan_epsilon = 0.001, wgan_target = 1.0, cond_weight = 1.0,  network_size=net_size, global_batch_size = global_batch_size)  
 
-        return gen_loss, disc_loss, global_loss, local_loss
+        #return batch,batch,batch,batch
+        return gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss
 
     if use_stategy:
         @tf.function
-        def training_step_tf_fuction_32(dataset, lod_in_value):
-            gen_loss, disc_loss, global_loss, local_loss = strategy.run(training_step, args=(next(dataset), lod_in_value))
+        def training_step_tf_fuction_32(train_dataset, test_dataset, lod_in_value):
+            gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = strategy.run(training_step, args=(next(train_dataset), next(test_dataset), lod_in_value))
 
             gen_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_loss, axis=None)
             disc_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_loss, axis=None)
             global_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, global_loss, axis=None)
             local_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, local_loss, axis=None)
+            
+            gen_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_test_loss, axis=None)
+            disc_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_test_loss, axis=None)
+            global_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, global_test_loss, axis=None)
+            local_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, local_test_loss, axis=None)
 
-            return gen_loss, disc_loss, global_loss, local_loss
+            return gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss
 
         @tf.function
-        def training_step_tf_fuction_64(dataset, lod_in_value):
-            gen_loss, disc_loss, global_loss, local_loss = strategy.run(training_step, args=(next(dataset), lod_in_value))
+        def training_step_tf_fuction_64(train_dataset, test_dataset, lod_in_value):
+            gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = strategy.run(training_step, args=(next(train_dataset), next(test_dataset), lod_in_value))
 
             gen_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_loss, axis=None)
             disc_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_loss, axis=None)
             global_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, global_loss, axis=None)
             local_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, local_loss, axis=None)
+            
+            gen_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_test_loss, axis=None)
+            disc_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_test_loss, axis=None)
+            global_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, global_test_loss, axis=None)
+            local_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, local_test_loss, axis=None)
 
-            return gen_loss, disc_loss, global_loss, local_loss
+            return gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss
 
         @tf.function
-        def training_step_tf_fuction_128(dataset, lod_in_value):
-            gen_loss, disc_loss, global_loss, local_loss = strategy.run(training_step, args=(next(dataset), lod_in_value))
+        def training_step_tf_fuction_128(train_dataset, test_dataset, lod_in_value):
+            gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = strategy.run(training_step, args=(next(train_dataset), next(test_dataset), lod_in_value))
 
             gen_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_loss, axis=None)
             disc_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_loss, axis=None)
             global_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, global_loss, axis=None)
             local_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, local_loss, axis=None)
+            
+            gen_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_test_loss, axis=None)
+            disc_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_test_loss, axis=None)
+            global_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, global_test_loss, axis=None)
+            local_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, local_test_loss, axis=None)
 
-            return gen_loss, disc_loss, global_loss, local_loss
+            return gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss
 
         @tf.function
-        def training_step_tf_fuction_256(dataset, lod_in_value):
-            gen_loss, disc_loss, global_loss, local_loss = strategy.run(training_step, args=(next(dataset), lod_in_value))
+        def training_step_tf_fuction_256(train_dataset, test_dataset, lod_in_value):
+            gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = strategy.run(training_step, args=(next(train_dataset), next(test_dataset), lod_in_value))
 
             gen_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_loss, axis=None)
             disc_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_loss, axis=None)
             global_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, global_loss, axis=None)
             local_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, local_loss, axis=None)
+            
+            gen_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, gen_test_loss, axis=None)
+            disc_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, disc_test_loss, axis=None)
+            global_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, global_test_loss, axis=None)
+            local_test_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, local_test_loss, axis=None)
 
-            return gen_loss, disc_loss, global_loss, local_loss
+            return gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss
     else:
         @tf.function
         def training_step_tf_fuction_32(dataset, lod_in_value):
-            gen_loss, disc_loss, global_loss, local_loss = training_step(next(dataset), lod_in_value)
-            return gen_loss, disc_loss, global_loss, local_loss
+            gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = training_step(next(dataset), lod_in_value)
+            return gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss
 
         @tf.function
         def training_step_tf_fuction_64(dataset, lod_in_value):
-            gen_loss, disc_loss, global_loss, local_loss = training_step(next(dataset), lod_in_value)
-            return gen_loss, disc_loss, global_loss, local_loss
+            gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = training_step(next(dataset), lod_in_value)
+            return gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss
 
         @tf.function
         def training_step_tf_fuction_128(dataset, lod_in_value):
-            gen_loss, disc_loss, global_loss, local_loss = training_step(next(dataset), lod_in_value)
-            return gen_loss, disc_loss, global_loss, local_loss
+            gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = training_step(next(dataset), lod_in_value)
+            return gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss
 
         @tf.function
         def training_step_tf_fuction_256(dataset, lod_in_value):
-            gen_loss, disc_loss, global_loss, local_loss = training_step(next(dataset), lod_in_value)
-            return gen_loss, disc_loss, global_loss, local_loss
+            gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = training_step(next(dataset), lod_in_value)
+            return gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss
 
     train_time = time.time()      
 
@@ -502,8 +601,17 @@ def train_cycle():
     global_loss_train = [] 
     local_loss_train = []
 
+    gen_loss_test = []
+    disc_loss_test = []
+    global_loss_test = [] 
+    local_loss_test = []
 
-    gw, gh, reals, fakes, grid = setup_image_grid(datapath, [3,256,256],  m_size = '1080p', is_ae=False)
+    
+    if not change_model:
+        gw, gh, reals, fakes, grid = setup_image_grid(datapath, [3,256,256],  m_size = '1080p', is_ae=False)
+    else:
+        num_colors = 1
+        gw, gh, reals, fakes, grid = setup_image_grid(datapath, [num_colors,init_res,init_res],  m_size = '1080p', is_ae=False)
 
     # curr_image = 4512000
     # with strategy.scope():
@@ -515,10 +623,52 @@ def train_cycle():
     #     #disc = networks.named_discriminator(resolution)
     #     disc.load_weights('saved_models/discriminator_4512.h5', by_name=True)
 
+    def optimizer_weight_setting(model, optimizer,optimizer_weights):
+        grad_vars = model.trainable_variables
+        zero_grads = [tf.zeros_like(w) for w in grad_vars]
+        optimizer.apply_gradients(zip(zero_grads, grad_vars))
+        #with open(optimizer_weights, 'rb') as f:
+        weight_values = np.load(optimizer_weights, allow_pickle=True)
+        optimizer.set_weights(weight_values)
+
+        return True
 
     while curr_image < total_kimg * 1000:
         # update model / variables (lr, lod, dataset) if needed 
-        print(curr_image)
+        # print(curr_image)
+
+
+        if load:
+            print('Loading...')
+            load_current_image = 2240
+            load_resolution = 64
+            curr_image = load_current_image * 1000
+            prev_res= -1
+            resolution = load_resolution
+
+
+            if use_stategy:
+                with strategy.scope():
+                    #increase models
+                    #gen.save_weights('generator.h5')
+                    gen = networks2.generator(resolution, num_channels=1, num_replicas = num_replicas)
+                    gen.load_weights('saved_models/generator_'+str(load_current_image)+'.h5', by_name=True)
+                    #os.remove('generator.h5') 
+
+                    #disc.save_weights('discriminator.h5')
+                    disc = networks2.Combined_Discriminator(resolution, num_channels=1, num_replicas = num_replicas)
+                    disc.built = True
+                    disc.load_weights('saved_models/discriminator_'+str(load_current_image)+'.h5', by_name=True)
+                    #os.remove('discriminator.h5') 
+
+                    cvae = networks2.CVAE(resolution=resolution, base_filter=int(32*(256/resolution)),latent_dim=2048,num_channels=1)
+                    cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
+                    cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final_'+str(resolution)+'.h5')
+
+                    gw, gh, reals, fakes, grid = setup_image_grid(datapath, [1,resolution,resolution],  m_size = '1080p', is_ae=False)
+                    
+
+
 
 
         lod, resolution, G_lrate, D_lrate = TrainingSchedule(
@@ -547,10 +697,15 @@ def train_cycle():
             lod_dataset = max_res_log2 - resolution_log2
             #get dataset and new batch size
             if use_stategy:
-                dataset = distributed_dataset[lod_dataset]
+                dataset_train = distributed_dataset_train[lod_dataset]
+                dataset_test = distributed_dataset_test[lod_dataset]
             else: 
                 dataset = dataset_list[lod_dataset]
-            dataset_iter = iter(dataset)
+                
+            dataset_iter_train = iter(dataset_train)
+            dataset_iter_test = iter(dataset_test)
+            
+            
             batch_size = int(batch_sizes_list[lod_dataset] / num_replicas)
             global_batch_size = batch_sizes_list[lod_dataset]
             
@@ -567,26 +722,64 @@ def train_cycle():
 
             #change optmizer
             if use_stategy:
+                print('Changing optimizer')
+                print(load)
                 with strategy.scope():
                     D_optimizer = Adam(learning_rate=G_lrate, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
                     G_optimizer = Adam(learning_rate=D_lrate, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+
+                print('Changing optimizer')
+                print(load)
+                if load:
+                    print('Loading Changing optimizer')
+                    #load_current_image = 2240
+                    g_opt_updt = strategy.run(optimizer_weight_setting, args=(gen, G_optimizer, outpath+'saved_models/pgan_optimizers/g_optimizer_'+str(load_current_image)+'.npy'))
+                    # g_opt_updt = strategy.reduce(tf.distribute.ReduceOp.SUM, g_opt_updt, axis=None)
+
+                    # print(g_opt_updt)
+
+                    d_opt_updt = strategy.run(optimizer_weight_setting, args=(disc, D_optimizer,outpath+'saved_models/pgan_optimizers/d_optimizer_'+str(load_current_image)+'.npy'))
+                    # d_opt_updt = strategy.reduce(tf.distribute.ReduceOp.SUM, d_opt_updt, axis=None)
+
+                    # print(d_opt_updt)
+
+                    # optimizer_weight_setting(gen, G_optimizer, outpath+'saved_models/pgan_optimizers/g_optimizer_'+str(load_current_image)+'.npy')
+                    # optimizer_weight_setting(disc, D_optimizer,outpath+'saved_models/pgan_optimizers/d_optimizer_'+str(load_current_image)+'.npy')
+
+                    load = False
+                    print('Loaded Optimizer')
             else:
+                print('Changing optimizer non strategy')
                 D_optimizer = Adam(learning_rate=G_lrate, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
                 G_optimizer = Adam(learning_rate=D_lrate, beta_1=BETA_1, beta_2=BETA_2, epsilon=EPSILON)
+                if load == True:
+                    load_current_image = 1920
+                    optimizer_weight_setting(gen, G_optimizer, outpath+'saved_models/pgan_optimizers/g_optimizer_'+str(load_current_image)+'.npy')
+                    optimizer_weight_setting(disc, D_optimizer,outpath+'saved_models/pgan_optimizers/d_optimizer_'+str(load_current_image)+'.npy')
+                    load = False
+            
 
             #change model
             if prev_res != -1 and change_model:
-                #increase models
-                gen.save_weights('generator.h5')
-                gen = networks2.generator(resolution)
-                gen.load_weights('generator.h5', by_name=True)
-                os.remove('generator.h5') 
+                if use_stategy:
+                    with strategy.scope():
+                        #increase models
+                        gen.save_weights('generator.h5')
+                        gen = networks2.generator(resolution, num_replicas = num_replicas,num_channels=1)
+                        gen.load_weights('generator.h5', by_name=True)
+                        os.remove('generator.h5') 
 
-                disc.save_weights('discriminator.h5')
-                disc = networks2.Combined_Discriminator(resolution)
-                disc.built = True
-                disc.load_weights('discriminator.h5', by_name=True)
-                os.remove('discriminator.h5') 
+                        disc.save_weights('discriminator.h5')
+                        disc = networks2.Combined_Discriminator(resolution, num_replicas = num_replicas, num_channels=1)
+                        disc.built = True
+                        disc.load_weights('discriminator.h5', by_name=True)
+                        os.remove('discriminator.h5') 
+
+                        cvae = networks2.CVAE(resolution=resolution, base_filter=int(32*(256/resolution)),latent_dim=2048,num_channels=1)
+                        cvae.built = True #subcalssed model needs to be built use tf format instead of hdf5 might solve the problem
+                        cvae.load_weights(outpath+'saved_models/vae/cvae_models/cvae_Final_'+str(resolution)+'.h5')
+
+                        gw, gh, reals, fakes, grid = setup_image_grid(datapath, [1,resolution,resolution],  m_size = '1080p', is_ae=False)
             
             elif prev_res != -1 and not change_model:
                 if use_stategy:
@@ -612,13 +805,13 @@ def train_cycle():
         for repeat in range(minibatch_repeats):
             #print(repeat)
             if resolution == 32:
-                gen_loss, disc_loss, global_loss, local_loss = training_step_tf_fuction_32(dataset_iter, lod_in_value)
+                gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = training_step_tf_fuction_32(dataset_iter_train, dataset_iter_test, lod_in_value)
             elif resolution == 64:
-                gen_loss, disc_loss, global_loss, local_loss = training_step_tf_fuction_64(dataset_iter, lod_in_value)
+                gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = training_step_tf_fuction_64(dataset_iter_train, dataset_iter_test, lod_in_value)
             elif resolution == 128:
-                gen_loss, disc_loss, global_loss, local_loss = training_step_tf_fuction_128(dataset_iter, lod_in_value)
+                gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = training_step_tf_fuction_128(dataset_iter_train, dataset_iter_test, lod_in_value)
             elif resolution == 256:
-                gen_loss, disc_loss, global_loss, local_loss = training_step_tf_fuction_256(dataset_iter, lod_in_value)
+                gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = training_step_tf_fuction_256(dataset_iter_train, dataset_iter_test, lod_in_value)
             #print(lossval.numpy())
 
         #Run Test
@@ -629,26 +822,41 @@ def train_cycle():
         disc_loss_train.append(disc_loss.numpy())
         global_loss_train.append(global_loss.numpy()) 
         local_loss_train.append(local_loss.numpy())
+        
+        gen_loss_test.append(gen_test_loss.numpy())
+        disc_loss_test.append(disc_test_loss.numpy())
+        global_loss_test.append(global_test_loss.numpy()) 
+        local_loss_test.append(local_test_loss.numpy())
 
         if curr_image % (global_batch_size * 100) == 0:
             print(curr_image)
             print(time.time() - train_time )
             print(lod_in_value)
             # get stats
-            print(gen_loss.numpy())
-            print(disc_loss.numpy())
-            print(global_loss.numpy())
-            print(local_loss.numpy())
-            print('\n')
+#             print(gen_loss.numpy())
+#             print(disc_loss.numpy())
+#             print(global_loss.numpy())
+#             print(local_loss.numpy())
             train_time = time.time()
-            grid = construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=cvae, gen_model=gen, lod_in=lod_in_value)
+            print ("-------------------------------------------------------------------------------------------------------------")
+            print ("{:<20} | {:<20} | {:<20} | {:<20} | {:<20}".format(' ', 'Generator', 'Discriminator', 'Global', 'Local'))
+            print ("{:<20} | {:<20} | {:<20} | {:<20} | {:<20}".format('Train', gen_loss.numpy(), disc_loss.numpy(), global_loss.numpy(), local_loss.numpy()))
+            print ("{:<20} | {:<20} | {:<20} | {:<20} | {:<20}".format('Test', gen_test_loss.numpy(), disc_test_loss.numpy(), global_test_loss.numpy(), local_test_loss.numpy()))
+            print ("-------------------------------------------------------------------------------------------------------------")
+            if change_model:
+                grid = construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=cvae, gen_model=gen, lod_in=lod_in_value,size=resolution)
+            else:
+                grid = construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=cvae, gen_model=gen, lod_in=lod_in_value,size=256)
             save_grid_pgan(gw, gh,grid, step=curr_image,outpath=outpath)
 
         if curr_image % (global_batch_size * 10000) == 0:
             # save model
             gen.save_weights(outpath+'saved_models/generator_'+str(int(curr_image/1000))+'.h5')
             disc.save_weights(outpath+'saved_models/discriminator_'+str(int(curr_image/1000))+'.h5')
-            pickle.dump({'gen_loss': gen_loss_train, 'disc_loss': disc_loss_train, 'global_loss': global_loss_train, 'local_loss': local_loss_train}, open(outpath+'losses.pkl', 'wb'))
+            pickle.dump({'gen_loss': gen_loss_train, 'disc_loss': disc_loss_train, 'global_loss': global_loss_train, 'local_loss': local_loss_train, 'gen_loss_test': gen_loss_test, 'disc_loss_test': disc_loss_test, 'global_loss_test': global_loss_test, 'local_loss_test': local_loss_test}, open(outpath+'losses.pkl', 'wb'))
+            # save optimizeer
+            np.save(outpath+'saved_models/pgan_optimizers/g_optimizer_'+str(int(curr_image/1000))+'.npy', G_optimizer.get_weights())
+            np.save(outpath+'saved_models/pgan_optimizers/d_optimizer_'+str(int(curr_image/1000))+'.npy', D_optimizer.get_weights())
             print('Model Saved')
         
         curr_image += global_batch_size
@@ -667,21 +875,30 @@ def encoder_train_cycle(lr=0.00005):
     LR = lr
 
     num_replicas = 1
+
+    list_res = [32,64,128,256]
     
     use_gpus = True
     use_multi_gpus = False
  
 
     #training repeats
-    n_epochs = 300
+    n_epochs = 150
 
     #initialization of paths
     #tfrecord_dir = '/home/renato/dataset'
     #tfrecord_dir = '/home/renato/dataset/satimages'
-    tfrecord_dir =  '/eos/user/r/redacost/progan/tfrecords1024/'
+    #tfrecord_dir =  '/eos/user/r/redacost/progan/tfrecords1024/'
+    #tfrecord_dir = '/eos/user/r/redacost/progan/Balanced_dataset/'
+    tfrecord_dir = '/eos/user/r/redacost/progan/floods/'
 
     start_init = time.time()
     f = [0.9, 0.1] # train, test fractions might be necessary
+
+    
+    minibatch_base = 32
+    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 256, 64: 128, 128: 128}
+    max_minibatch_per_gpu = {256: 128, 512: 8, 1024: 8}
 
 
 
@@ -696,19 +913,12 @@ def encoder_train_cycle(lr=0.00005):
     else:
         use_stategy = False
 
-
-    #initialize models and optimizer
     if use_stategy:
         print ('Number of devices: {}'.format(strategy.num_replicas_in_sync))
         num_replicas = strategy.num_replicas_in_sync
-        global_batch_size = 32 * num_replicas
-        print('Global batch size: ' + str(global_batch_size))
-        with strategy.scope():
-            cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
-    else:
-        cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=128)
+        # global_batch_size = 32 * num_replicas
+        # print('Global batch size: ' + str(global_batch_size))
 
-    opt = Adam(learning_rate=LR, epsilon=EPSILON)
 
     #load data
 
@@ -727,55 +937,12 @@ def encoder_train_cycle(lr=0.00005):
     #count = sum(1 for _ in tf.data.TFRecordDataset(tfr_file))
     #print(count)
 
-    tfr_file = sorted(glob.glob(os.path.join(tfrecord_dir, '*r08.tfrecords')))[0]
-
-
-    shuffle_mb = 10350     # Shuffle data within specified window (megabytes), 0 = disable shuffling.
-    #shuffle_mb = 27350 
-
-    dset = tf.data.TFRecordDataset(tfr_file, compression_type='')
-    # lod_dataset = 0
-    # dataset = dataset_list[lod_dataset]
-
-    #get dataset
     
-    
-    #use parse function
-    dset = dset.map(parse_tfrecord_tf, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-
-    #shuffle
-    if shuffle_mb > 0:
-        dset = dset.shuffle(shuffle_mb)
-    #repeat    
-    dset = dset.repeat()
-    #prefetch
-    dset = dset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-    #batch
-    print('Global batch size: ' + str(global_batch_size))
-    dset = dset.batch(global_batch_size)
-
-    if use_stategy:
-        dset = strategy.experimental_distribute_dataset(dset)
-        
-    dataset_iter = iter(dset)
-
-    print('Dataset Read')
-
-    
-    dataset_size = 10350 
-    batch_repeats = int(dataset_size / global_batch_size)
-
-    print('N_batches = ' + str(batch_repeats))
-
-    #do any necessary data processing
 
     # Start training
     epoch_start = time.time()
 
-    #setup image grid
-    gw, gh, reals, fakes, grid = setup_image_grid([3,128,128],  m_size = '1080p')
-
-    def training_step(batch):
+    def training_step(batch, iterat):
         mirror_augment = False
         drange_net = [-1,1]
         drange_data = [0, 255]
@@ -783,15 +950,71 @@ def encoder_train_cycle(lr=0.00005):
         batch = process_reals_cvae(batch, drange_data, drange_net)
         #return batch
 
-        reconstruction_loss, kl_loss = loss.wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, kernel_type = 'rbf')
+        #reconstruction_loss, kl_loss = loss.wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, kernel_type = 'imq')
+        reconstruction_loss, kl_loss = loss.wasserstein_auto_encoder_loss(cvae, batch, global_batch_size, opt, net_size, kernel_type = 'rbf')
+        #reconstruction_loss, kl_loss = loss.Beta_TC_auto_encoder_loss(cvae, batch, global_batch_size, opt, iterat, desintangled=False)
 
 
         return  reconstruction_loss, kl_loss
 
     if use_stategy:
         @tf.function
-        def training_step_tf_fuction(dataset):
-            reconstruction_loss, kl_loss = strategy.run(training_step, args=(next(dataset),))
+        def training_step_tf_fuction_4(dataset,iterat):
+            reconstruction_loss, kl_loss = strategy.run(training_step, args=(next(dataset),iterat))
+
+            reconstruction_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, reconstruction_loss, axis=None)
+            kl_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, kl_loss, axis=None)
+            #rgb_angle = strategy.reduce(tf.distribute.ReduceOp.SUM, rgb_angle, axis=None)
+
+            return reconstruction_loss, kl_loss
+        @tf.function
+        def training_step_tf_fuction_8(dataset,iterat):
+            reconstruction_loss, kl_loss = strategy.run(training_step, args=(next(dataset),iterat))
+
+            reconstruction_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, reconstruction_loss, axis=None)
+            kl_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, kl_loss, axis=None)
+            #rgb_angle = strategy.reduce(tf.distribute.ReduceOp.SUM, rgb_angle, axis=None)
+
+            return reconstruction_loss, kl_loss
+        @tf.function
+        def training_step_tf_fuction_16(dataset,iterat):
+            reconstruction_loss, kl_loss = strategy.run(training_step, args=(next(dataset),iterat))
+
+            reconstruction_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, reconstruction_loss, axis=None)
+            kl_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, kl_loss, axis=None)
+            #rgb_angle = strategy.reduce(tf.distribute.ReduceOp.SUM, rgb_angle, axis=None)
+
+            return reconstruction_loss, kl_loss
+        @tf.function
+        def training_step_tf_fuction_32(dataset,iterat):
+            reconstruction_loss, kl_loss = strategy.run(training_step, args=(next(dataset),iterat))
+
+            reconstruction_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, reconstruction_loss, axis=None)
+            kl_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, kl_loss, axis=None)
+            #rgb_angle = strategy.reduce(tf.distribute.ReduceOp.SUM, rgb_angle, axis=None)
+
+            return reconstruction_loss, kl_loss
+        @tf.function
+        def training_step_tf_fuction_64(dataset,iterat):
+            reconstruction_loss, kl_loss = strategy.run(training_step, args=(next(dataset),iterat))
+
+            reconstruction_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, reconstruction_loss, axis=None)
+            kl_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, kl_loss, axis=None)
+            #rgb_angle = strategy.reduce(tf.distribute.ReduceOp.SUM, rgb_angle, axis=None)
+
+            return reconstruction_loss, kl_loss
+        @tf.function
+        def training_step_tf_fuction_128(dataset,iterat):
+            reconstruction_loss, kl_loss = strategy.run(training_step, args=(next(dataset),iterat))
+
+            reconstruction_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, reconstruction_loss, axis=None)
+            kl_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, kl_loss, axis=None)
+            #rgb_angle = strategy.reduce(tf.distribute.ReduceOp.SUM, rgb_angle, axis=None)
+
+            return reconstruction_loss, kl_loss
+        @tf.function
+        def training_step_tf_fuction_256(dataset,iterat):
+            reconstruction_loss, kl_loss = strategy.run(training_step, args=(next(dataset),iterat))
 
             reconstruction_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, reconstruction_loss, axis=None)
             kl_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, kl_loss, axis=None)
@@ -800,50 +1023,139 @@ def encoder_train_cycle(lr=0.00005):
             return reconstruction_loss, kl_loss
     else:
         @tf.function
-        def training_step_tf_fuction(dataset):
+        def training_step_tf_fuction_32(dataset):
             reconstruction_loss, kl_loss = training_step(next(dataset),)
             return reconstruction_loss, kl_loss
+
+
+
+    tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir, '*.tfrecords')))
+    dataset_list, batch_sizes_list = get_dataset(tfr_files, flood=True, num_gpus=num_replicas, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu) #all the images for all the lods
+    if use_stategy:
+        distributed_dataset = {}
+        for key, value in dataset_list.items():
+            distributed_dataset[key] = strategy.experimental_distribute_dataset(value)
+            
+#     dset = retrieve_balanced_tfrecords(tfr_files, 32 * num_replicas)
+#     dataset = strategy.experimental_distribute_dataset(dset)
+
         
     train_time = time.time()      
 
     reconstruction_loss_train = []
     kl_loss_train = []
 
-    for epoch in range(n_epochs):
-        print('Epoch: ' + str(epoch))
+    prev_res = -1
 
-        train_time = time.time() 
 
-        # Run training ops.
-        for _ in range(batch_repeats):
-            reconstruction_loss, kl_loss = training_step_tf_fuction(dataset_iter)
+    for el in list_res:
 
-            #Run Test
-
-            reconstruction_loss_train.append(reconstruction_loss.numpy())
-            kl_loss_train.append(kl_loss.numpy())
+        resolution_log2 = int(np.log2(el))
+        lod_dataset = int(np.log2(256)) - resolution_log2
+        #get dataset and new batch size
+        if use_stategy:
+            dataset = distributed_dataset[lod_dataset]
+        else: 
+            dataset = dataset_list[lod_dataset]
+        dataset_iter = iter(dataset)
+        batch_size = int(batch_sizes_list[lod_dataset] / num_replicas)
+        global_batch_size = batch_sizes_list[lod_dataset]
+#         global_batch_size = 32 * num_replicas
+#         batch_size = int(global_batch_size / num_replicas)
 
         
-        # print(time.time() - train_time )
-        # print('Reconstruction Loss ' + str(reconstruction_loss.numpy()))
-        # print('Kl Loss ' + str(kl_loss.numpy()))
+        net_size = int(el / 2)
+        print(net_size)
 
-        # save model
-        if epoch % 10 == 0:
-            cvae.save_weights('saved_models/vae/cvae_'+str(int(epoch))+'.h5')
-            grid = construct_grid_to_save(gw, gh, reals, fakes, grid, model=cvae, step=epoch)
-            save_grid(gw, gh,grid, step=epoch)
-            # print('Model Saved')
-            print(time.time() - train_time )
-            print('Reconstruction Loss ' + str(reconstruction_loss.numpy()))
-            print('Kl Loss ' + str(kl_loss.numpy()))
-            #print('rgb_angle ' + str(rgb_angle.numpy())) 
-        pickle.dump({'reconstruction_loss': reconstruction_loss_train, 'kl_loss': kl_loss_train}, open('saved_models/vae/losses_'+str(lr)+'.pkl', 'wb'))
-        
+        dataset_size = 62747 
+        batch_repeats = int(dataset_size / global_batch_size)
 
-    cvae.save_weights('saved_models/vae/cvae_models/cvae_Final.h5')
-    grid = construct_grid_to_save(gw, gh, reals, fakes, grid, model=cvae, step=epoch)
-    save_grid(gw, gh,grid, step=epoch)
+        print('N_batches = ' + str(batch_repeats))
+
+        #setup image grid
+        gw, gh, reals, fakes, grid = setup_image_grid('/eos/user/r/redacost/progan/floods/',[1,net_size,net_size],  m_size = '1080p')
+        print('image grid done')
+
+
+        if prev_res == -1:
+            #initialize models and optimizer
+            if use_stategy:
+                with strategy.scope():
+                    #cvae = networks2.CVAE(resolution=256, base_filter=32,latent_dim=512)
+                    cvae = networks2.CVAE(resolution=el, base_filter=int(32*(256/el)),latent_dim=2048,num_channels=1) #change value 32 according to init res
+                    #cvae = networks2.Beta_VAE(resolution=el, base_filter=int(32*(256/el)),latent_dim=512)
+            else:
+                cvae = networks2.CVAE(resolution=el, base_filter=int(32*(256/el)),latent_dim=2048,num_channels=1)
+            prev_res=0
+        #change model
+        else:
+            with strategy.scope():
+                #increase models
+                cvae.save_weights('cvae.h5')
+                cvae = networks2.CVAE(resolution=el, base_filter=int(32*(256/el)),latent_dim=2048,num_channels=1) #change value 32 according to init res
+                cvae.built = True
+                cvae.load_weights('cvae.h5', by_name=True)
+                os.remove('cvae.h5') 
+
+
+
+        with strategy.scope():
+            opt = Adam(learning_rate=LR, epsilon=EPSILON)
+
+        n_iterat = 0
+
+        for epoch in range(n_epochs):
+            print('Epoch: ' + str(epoch))
+
+            train_time = time.time() 
+
+            iterat = tf.constant(n_iterat)
+            iterat = tf.cast(iterat, tf.float32)
+
+            # Run training ops.
+            for _ in range(batch_repeats):
+                if el == 4:
+                    reconstruction_loss, kl_loss = training_step_tf_fuction_4(dataset_iter,iterat)
+                elif el == 8:
+                    reconstruction_loss, kl_loss = training_step_tf_fuction_8(dataset_iter,iterat)
+                elif el == 16:
+                    reconstruction_loss, kl_loss = training_step_tf_fuction_16(dataset_iter,iterat)
+                elif el == 32:
+                    reconstruction_loss, kl_loss = training_step_tf_fuction_32(dataset_iter,iterat)
+                elif el == 64:
+                    reconstruction_loss, kl_loss = training_step_tf_fuction_64(dataset_iter,iterat)
+                elif el == 128:
+                    reconstruction_loss, kl_loss = training_step_tf_fuction_128(dataset_iter,iterat)
+                elif el == 256:
+                    reconstruction_loss, kl_loss = training_step_tf_fuction_256(dataset_iter,iterat)
+
+                #Run Test
+
+                reconstruction_loss_train.append(reconstruction_loss.numpy())
+                kl_loss_train.append(kl_loss.numpy())
+
+            n_iterat +=1
+            
+            # print(time.time() - train_time )
+            # print('Reconstruction Loss ' + str(reconstruction_loss.numpy()))
+            # print('Kl Loss ' + str(kl_loss.numpy()))
+
+            # save model
+            if epoch % 10 == 0:
+                cvae.save_weights('saved_models/vae/cvae_'+str(int(epoch))+'.h5')
+                grid = construct_grid_to_save(gw, gh, reals, fakes, grid, model=cvae, step=epoch,size=net_size)
+                save_grid(gw, gh,grid, step=epoch)
+                # print('Model Saved')
+                print(time.time() - train_time )
+                print('Reconstruction Loss ' + str(reconstruction_loss.numpy()))
+                print('Kl Loss ' + str(kl_loss.numpy()))
+                #print('rgb_angle ' + str(rgb_angle.numpy())) 
+            pickle.dump({'reconstruction_loss': reconstruction_loss_train, 'kl_loss': kl_loss_train}, open('saved_models/vae/losses_'+str(lr)+'.pkl', 'wb'))
+            
+
+        cvae.save_weights('saved_models/vae/cvae_models/cvae_Final_'+str(el)+'.h5')
+        grid = construct_grid_to_save(gw, gh, reals, fakes, grid, model=cvae, step=epoch,size=net_size)
+        save_grid(gw, gh,grid, step=epoch)
 
     total_loss = reconstruction_loss + kl_loss
 
@@ -869,31 +1181,54 @@ def get_parser():
     #parser.add_argument('--max_minibatch_per_gpu', action='store', type=int, default=64)
     #parser.add_argument('--G_lrate_dict', action='store', type=int, default=64)
     #parser.add_argument('--D_lrate_dict', action='store', type=int, default=64)
-    parser.add_argument('--total_kimg', action='store', type=int, default=1200)
+    parser.add_argument('--total_kimg', action='store', type=int, default=12000)
     parser.add_argument('--minibatch_repeats', action='store', type=int, default=4)
-    parser.add_argument('--D_repeats', action='store', type=int, default=1)
+    parser.add_argument('--D_repeats', action='store', type=int, default=2)
 
     #batch size (total value, it is then divided by each gpu)
     parser.add_argument('--batch_size', action='store', type=int, default=8)
     
     #parser.add_argument('--do_profiling', action='store', default=False)
+
+    #load model
+    parser.add_argument('--load', action='store', default=False)
+
     return parser
 
 
 
 if __name__ == "__main__":
-    #os.environ["CUDA_VISIBLE_DEVICES"]="1"
-    #gpus = tf.config.experimental.list_physical_devices('GPU')
-    #for gpu in gpus:
-    #    tf.config.experimental.set_memory_growth(gpu, True)
+#     os.environ["CUDA_VISIBLE_DEVICES"]="0"
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
 
     # For pgan training
     train_cycle()
 
     #for auto encoder training
-    #model = encoder_train_cycle(lr=8.5e-5)
+    # model = encoder_train_cycle(lr=8.5e-5)
 
 
     #study = optuna.create_study()
     #study.optimize(objective, n_trials=100, callbacks=[print_best_callback])
     print('Finished Training')
+    
+#     datapath = '/eos/user/r/redacost/progan/floods/'
+#     tfrecord_dir = datapath
+#     tfr_file = datapath + 'floods-r08.tfrecords'
+#     num_threads     = 1
+
+#     dset = tf.data.TFRecordDataset(tfr_file)
+#     dset = dset.map(parse_tfrecord_tf_floods, num_parallel_calls=num_threads)
+
+#     dataset_iter = iter(dset)
+
+#     n_images = 62747
+#     for i in range(n_images):
+#         if i%100 == 0:
+#             print(i)
+#         img = next(dataset_iter).numpy()[0][0]
+
+#         #plt.imshow(img, cmap='gray', vmin=0, vmax=255)
+#         #plt.show()

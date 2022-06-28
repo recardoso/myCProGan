@@ -5,6 +5,7 @@ import tensorflow as tf
 import glob
 import argparse
 import json
+import math
 
 #import config
 #import tfutil
@@ -13,6 +14,7 @@ import networks2
 import loss
 from train import *
 #import misc
+import matplotlib.pyplot as plt
 
 from tensorflow.keras.optimizers import Adam
 
@@ -96,7 +98,7 @@ def generate_image(gen, img, saveloc, fullsize, lod_in=0.0):
 
     return
 
-def snapshot(datapath,n_images=1, save=False):
+def snapshot(datapath, resolution_log2=256, n_images=1, save=False):
     #tfrecord_dir = '/home/renato/dataset/satimages'
     #tfrecord_dir =  '/eos/user/r/redacost/progan/tfrecords1024/'
     tfrecord_dir = datapath
@@ -104,10 +106,11 @@ def snapshot(datapath,n_images=1, save=False):
     minibatch_base = 32
     minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 64, 64: 64, 128: 32}
     max_minibatch_per_gpu = {256: 16, 512: 8, 1024: 8}
-    dataset_list, batch_sizes_list = get_dataset(tfr_files, num_gpus=1, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu)
-    lod_dataset = 0
+    dataset_list, batch_sizes_list = get_dataset(tfr_files, flood=True, num_gpus=1, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu)
+    lod_dataset = int(np.log2(256)) - int(np.log2(resolution_log2))
     dataset = dataset_list[lod_dataset]
     print(dataset)
+    print(lod_dataset)
     #(train, val, test) = tfds.load("eurosat/rgb", split=["train[:100%]", "train[80%:90%]", "train[90%:]"])
 
     # def prepare_training_data(datapoint):
@@ -236,7 +239,7 @@ def setup_image_grid(datapath,dataset_shape, m_size= '1080p', is_ae=True):
 
     if is_ae:
 
-        images = snapshot(datapath,n_images=int((gw / 2)) * gh, save=False)
+        images = snapshot(datapath,resolution_log2=size*2,n_images=int((gw / 2)) * gh, save=False)
 
         # Fill in reals and labels.
         reals = np.zeros([int((gw / 2) * gh)] + dataset_shape, dtype=np.float32)
@@ -257,7 +260,7 @@ def setup_image_grid(datapath,dataset_shape, m_size= '1080p', is_ae=True):
     else:
         size = int(size / 2)
 
-        images = snapshot(datapath,n_images=int(gw * gh), save=False)
+        images = snapshot(datapath,resolution_log2=size*2,n_images=int(gw * gh), save=False)
 
         # Fill in reals and labels.
         reals = np.zeros([int(gw * gh)] + dataset_shape, dtype=np.float32)
@@ -269,7 +272,7 @@ def setup_image_grid(datapath,dataset_shape, m_size= '1080p', is_ae=True):
             corner1= real[:, :(size),:(size)]
             corner2= real[:, (size):,:(size)]
             corner3= real[:, :(size),(size):]
-            corner4= np.zeros([3, 128, 128])
+            corner4= np.zeros([1, size, size])
 
             image_right = tf.concat([corner3, corner4], axis=1)
             image_left = tf.concat([corner1, corner2], axis=1)
@@ -281,8 +284,7 @@ def setup_image_grid(datapath,dataset_shape, m_size= '1080p', is_ae=True):
         # Generate latents.
         return gw, gh, reals, fakes, grid
 
-def construct_grid_to_save(gw, gh, reals, fakes, grid, model=None, step=0):
-    size=128
+def construct_grid_to_save(gw, gh, reals, fakes, grid, model=None, step=0,size=128):
     if model != None:
         cvae = model
     else:
@@ -299,7 +301,7 @@ def construct_grid_to_save(gw, gh, reals, fakes, grid, model=None, step=0):
             #im= im[:,:, :(size),:(size)]
             #im= np.transpose(im, (2, 0, 1))
 
-            batch = np.zeros((1, 3, size, size))
+            batch = np.zeros((1, 1, size, size))
             batch[0] = im
             #batch = batch[:,:, :(size),:(size)]
 
@@ -324,8 +326,8 @@ def construct_grid_to_save(gw, gh, reals, fakes, grid, model=None, step=0):
 
     return grid_to_save
 
-def construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=None, gen_model=None, lod_in=0.0):
-    size=128
+def construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=None, gen_model=None, lod_in=0.0, size=256):
+    size = int(size/2)
     for idx in range(gw * gh):
         x = idx % gw; y = idx // gw
         
@@ -334,7 +336,7 @@ def construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=None, gen_model=
         #im= im[:,:, :(size),:(size)]
         #im= np.transpose(im, (2, 0, 1))
 
-        batch = np.zeros((1, 3, 256, 256))
+        batch = np.zeros((1, 1, size*2, size*2))
         batch[0] = im
         #batch = batch[:,:, :(size),:(size)]
 
@@ -344,7 +346,7 @@ def construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=None, gen_model=
         corner3= batch[:,:, :(size),(size):]
 
 
-        noise_shape = 512
+        noise_shape = 2048
 
          #generate noise image
         latents = tf.random.normal([1, noise_shape])
@@ -392,9 +394,10 @@ def save_grid(gw, gh,grid,dataset_shape=None,step=0):
         y = (idx // gw) * img_h
         save_grid[..., y : y + img_h, x : x + img_w] = grid[idx]
 
-    image = save_grid.transpose(1, 2, 0) 
+    #image = save_grid.transpose(1, 2, 0) 
+    image = np.squeeze(save_grid, axis=0)
     image = np.rint(image).clip(0, 255).astype(np.uint8)
-    format = 'RGB'
+    format = 'L'
     image = Image.fromarray(image, format).save('saved_models/vae/snapshots/grid_'+str(step)+'.png')
 
     return save_grid
@@ -410,9 +413,80 @@ def save_grid_pgan(gw, gh,grid,dataset_shape=None,step=0,outpath=''):
         y = (idx // gw) * img_h
         save_grid[..., y : y + img_h, x : x + img_w] = grid[idx]
 
-    image = save_grid.transpose(1, 2, 0) 
+#     image = save_grid.transpose(1, 2, 0) 
+#     image = np.rint(image).clip(0, 255).astype(np.uint8)
+#     format = 'RGB'
+#     image = Image.fromarray(image, format).save(outpath+'saved_models/pgan/snapshots/grid_'+str(step)+'.png')
+
+    image = np.squeeze(save_grid, axis=0)
     image = np.rint(image).clip(0, 255).astype(np.uint8)
-    format = 'RGB'
+    format = 'L'
     image = Image.fromarray(image, format).save(outpath+'saved_models/pgan/snapshots/grid_'+str(step)+'.png')
 
     return save_grid
+
+def get_edges(datapath):
+    tfrecord_dir = datapath
+    tfr_files = sorted(glob.glob(os.path.join(tfrecord_dir, '*.tfrecords')))
+    minibatch_base = 32
+    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: 64, 64: 64, 128: 32}
+    max_minibatch_per_gpu = {256: 16, 512: 8, 1024: 8}
+    dataset_list, batch_sizes_list = get_dataset(tfr_files, num_gpus=1, minibatch_base = minibatch_base, minibatch_dict = minibatch_dict, max_minibatch_per_gpu = max_minibatch_per_gpu)
+    lod_dataset = 0
+    dataset = dataset_list[lod_dataset]
+    print(dataset)
+
+    dataset_iter = iter(dataset)
+    min = 255 #0
+    max = 0 #242
+
+    l = [0] * 256
+
+    n_images = 1000 
+
+
+    for i in range(n_images):
+        dataset_el = next(dataset_iter).numpy()[0]
+        dataset_el = dataset_el.flatten()
+        for el in dataset_el:
+            l[el] = l[el] + 1
+        #r = dataset_el[0]
+        # d_min = np.amin(dataset_el)
+        # if d_min < min:
+        #     min = d_min
+        #     print("min: " + str(min))
+        # d_max = np.amax(dataset_el)
+        # if d_max > max:
+        #     max = d_max
+        #     print("max: " + str(max))
+        #g = dataset_el[1]
+        #b = dataset_el[2]
+
+        if i % 100 == 0:
+            print(i)
+            #print(dataset_el)
+            #print(dataset_el.size)
+
+    data = np.array(l)
+    print(l)
+
+    bins = np.linspace(0, 255,256) # fixed number of bins
+    print(bins)
+
+    fig, ax = plt.subplots()
+
+    plt.xlim([0, 256+5])
+    #plt.ylim([0, 10000000])
+
+    plt.bar(bins, data)
+    plt.title('Random Gaussian data (fixed number of bins)')
+    plt.xlabel('variable X (20 evenly spaced bins)')
+    plt.ylabel('count')
+
+    #ax.plot()
+
+    fig.savefig("color_hystogram.png")
+
+if __name__ == "__main__":
+    get_edges('/eos/user/r/redacost/progan/tfrecords1024/')
+        

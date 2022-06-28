@@ -197,20 +197,25 @@ def nf(stage, fmap_base, fmap_decay, fmap_max):
 def generator_block(x,res,resolution_log2,gain=np.sqrt(2),y=None):
     fmap_base           = 8192        # Overall multiplier for the number of feature maps.
     fmap_decay          = 1.0          # log2 feature map reduction when doubling the resolution.
-    fmap_max            = 128          # Maximum number of feature maps in any layer.
+    fmap_max            = 512          # Maximum number of feature maps in any layer.
     scope_name = '%dx%d' % (2**res, 2**res)
     # y_temp=y
-    if res == 5: # 32x32
+    if res == 2: # 4x4
         x = Pixel_norm_layer(epsilon=1e-8)(x)
-        x = tf.reshape(x, [-1, 32, 8, 8]) #if res is changed this should change as well
+        # skipped dense layer so it doesn't interfere with the concatenation of the noise and ae latents
+        #x = tf.reshape(x, [-1, 32, 8, 8]) #if res is changed this should change as well
+        x = tf.reshape(x, [-1, nf(res-1, fmap_base, fmap_decay, fmap_max), 4, 4]) 
+        #name= scope_name + '/Conv_base'
+        #x = conv2dwscale(x, filters=nf(res-1, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
         bias_name = scope_name + '_Dense_bias_PN'
         #x = PN(act(apply_bias(x)))
         x = Bias(input_shape=x.shape, name=bias_name)(x)
         x = LeakyReLU(0.2)(x)
         x = Pixel_norm_layer(epsilon=1e-8)(x)
         name = scope_name + '/Conv'
-        x = upscale_conv2dwscale(x, filters=64, kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name) #original uses a conv2d for 4x4 layer
-    else: #x64 and up
+        #x = upscale_conv2dwscale(x, filters=nf(res-1, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name) #original uses a conv2d for 4x4 layer
+        x = conv2dwscale(x, filters=nf(res-1, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
+    else: #x8 and up
         # for r in range(resolution_log2, res-1, -1):
         #     name = scope_name + 'Conv_down%d_%d' %(res, r)
         #     y_temp= conv2d_downscale2dwscale(y_temp, filters=nf(res-5, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=False, activation=True, strides=(1,1), name=name)
@@ -219,9 +224,9 @@ def generator_block(x,res,resolution_log2,gain=np.sqrt(2),y=None):
         # name = scope_name + '/ConvConcat'
         # x = conv2dwscale(x, filters=nf(res-5, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
         name = scope_name + '/Conv0'
-        x = conv2dwscale(x, filters=nf(res-5, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
+        x = conv2dwscale(x, filters=nf(res-1, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
         name = scope_name + '/Conv1'
-        x = conv2dwscale(x, filters=nf(res-5, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
+        x = conv2dwscale(x, filters=nf(res-1, fmap_base, fmap_decay, fmap_max), kernel_size=(3,3), gain=gain, use_pixelnorm=True, activation=True, strides=(1,1), name=name)
     return x
 
 def discriminator_block(x,res,resolution_log2,gain=np.sqrt(2),mbstd_group_size = 4):
