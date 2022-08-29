@@ -10,9 +10,10 @@ import math
 #import config
 #import tfutil
 #import dataset
-import networks2
-import loss
-from train import *
+import myCProGan.networks2 as networks2
+import myCProGan.loss as loss
+from myCProGan.dataset import *
+#from myCProGan.train import *
 #import misc
 import matplotlib.pyplot as plt
 
@@ -25,6 +26,14 @@ from PIL import Image
 
 import pickle
 #import optuna
+
+def adjust_dynamic_range(data, drange_in, drange_out):
+    if drange_in != drange_out:
+        scale = (np.float32(drange_out[1]) - np.float32(drange_out[0])) / (np.float32(drange_in[1]) - np.float32(drange_in[0]))
+        bias = (np.float32(drange_out[0]) - np.float32(drange_in[0]) * scale)
+        data = data * scale + bias
+    return data
+
 
 def get_image(imgi):
     filename = 'cond4/'+str(imgi)+'.png'

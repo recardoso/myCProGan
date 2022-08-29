@@ -20,7 +20,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Layer, InputSpec, Conv2D, Conv2DTranspose, Activation, Reshape, LayerNormalization, BatchNormalization, UpSampling2D
 from tensorflow.keras.layers import Input, UpSampling2D, Dropout, Concatenate, Add, Dense, Multiply, LeakyReLU, Flatten, AveragePooling2D, Multiply
 
-from layers import *
+from myCProGan.layers import *
 
 #Use for tensorflow 2
 #from tensorflow.python.keras.layers.ops import core as core_ops

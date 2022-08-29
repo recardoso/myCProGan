@@ -7,7 +7,7 @@
 
 import numpy as np
 import tensorflow as tf
-import networks2
+import myCProGan.networks2 as networks2
 import math
 #import config
 
@@ -70,7 +70,7 @@ def G_wgan_acgan(G, D, opt, training_set, minibatch_size, reals,
     return loss
 
 def Generator_loss(G, combined_D, encoder, reals, minibatch_size, opt=None, lod_in=0.0, training_set=None, cond_weight = 1.0, network_size=256, global_batch_size = 1): # Weight of the conditioning term.
-    print('Mini-batch size G ' + str(minibatch_size))
+    print('Mini-batch size G ' + str(minibatch_size), flush=True)
     size= int(network_size / 2)  
     n_gpus = int(global_batch_size/minibatch_size)  
     # Conditional GAN Loss
@@ -140,7 +140,7 @@ def Generator_loss(G, combined_D, encoder, reals, minibatch_size, opt=None, lod_
     return g_loss
 
 def Generator_test_loss(G, combined_D, encoder, reals, minibatch_size, opt=None, lod_in=0.0, training_set=None, cond_weight = 1.0, network_size=256, global_batch_size = 1): # Weight of the conditioning term.
-    print('Mini-batch size G ' + str(minibatch_size))
+    print('Mini-batch size G ' + str(minibatch_size), flush=True)
     size= int(network_size / 2)  
     n_gpus = int(global_batch_size/minibatch_size)  
     # Conditional GAN Loss
@@ -508,7 +508,7 @@ def combined_Discriminator_loss(G, combined_D, encoder, reals, minibatch_size, o
 
     #loss scalling (it is not doing loss scalling) !!!!
     n_gpus = int(global_batch_size/minibatch_size)
-    print('N GPUS: ' +str(n_gpus))
+    print('N GPUS: ' +str(n_gpus), flush=True)
     print('Mini-batch size D ' + str(minibatch_size))
     size= int(network_size / 2) 
     print('real shape' + str(reals.shape))
@@ -602,7 +602,7 @@ def combined_Discriminator_loss(G, combined_D, encoder, reals, minibatch_size, o
         local_loss += local_epsilon_penalty * wgan_epsilon
 
         
-        join_loss = (global_loss_weight * global_loss + local_loss_weight * local_loss)
+        join_loss = (global_loss_weight * global_loss**2 + local_loss_weight * local_loss**2)
         d_loss = tf.reduce_mean(join_loss) / n_gpus
 
 
@@ -627,7 +627,7 @@ def combined_Discriminator_test_loss(G, combined_D, encoder, reals, minibatch_si
 
     #loss scalling (it is not doing loss scalling) !!!!
     n_gpus = int(global_batch_size/minibatch_size)
-    print('N GPUS: ' +str(n_gpus))
+    print('N GPUS: ' +str(n_gpus), flush=True)
     print('Mini-batch size D ' + str(minibatch_size))
     size= int(network_size / 2) 
     print('real shape' + str(reals.shape))
@@ -721,7 +721,7 @@ def combined_Discriminator_test_loss(G, combined_D, encoder, reals, minibatch_si
     local_loss += local_epsilon_penalty * wgan_epsilon
 
 
-    join_loss = (global_loss_weight * global_loss + local_loss_weight * local_loss)
+    join_loss = (global_loss_weight * global_loss**2 + local_loss_weight * local_loss**2)
     d_loss = tf.reduce_mean(join_loss) / n_gpus
 
     return d_loss, tf.reduce_mean(global_loss) / n_gpus, tf.reduce_mean(local_loss) / n_gpus
