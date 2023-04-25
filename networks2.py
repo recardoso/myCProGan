@@ -20,7 +20,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Layer, InputSpec, Conv2D, Conv2DTranspose, Activation, Reshape, LayerNormalization, BatchNormalization, UpSampling2D
 from tensorflow.keras.layers import Input, UpSampling2D, Dropout, Concatenate, Add, Dense, Multiply, LeakyReLU, Flatten, AveragePooling2D, Multiply
 
-from myCProGan.layers import *
+from layers import *
 
 #Use for tensorflow 2
 #from tensorflow.python.keras.layers.ops import core as core_ops
@@ -64,10 +64,12 @@ def generator(resolution=256,num_channels=3,num_replicas=1): #confirm params and
         images_out = Lerp_clip_layer()([img, images_out, lod_in - lod])
         #lerp_clip(img, images_out, lod_in - lod)
 
+    images_out = Activation('linear', dtype=dtype)(images_out)
+        
     assert images_out.dtype == tf.as_dtype(dtype)
     images_out = tf.identity(images_out, name='images_out')
     
-    Model(inputs=[latent, ae_latent, lod_in], outputs=[images_out]).summary()
+    Model(inputs=[latent, ae_latent, lod_in], outputs=[images_out])#.summary()
     
     return Model(inputs=[latent, ae_latent, lod_in], outputs=[images_out])
 
@@ -97,11 +99,13 @@ def discriminator(resolution=256, num_channels=3, label_size = 0, mbstd_group_si
         x = Lerp_clip_layer()([x, y, lod_in - lod])
     combo_out = discriminator_block(x, 2, resolution_log2, mbstd_group_size = mbstd_group_size)
 
+    combo_out = Activation('linear', dtype=dtype)(combo_out)
+        
     assert combo_out.dtype == tf.as_dtype(dtype)
     scores_out = tf.identity(combo_out[:, :1], name='scores_out')
     #labels_out = tf.identity(combo_out[:, 1:], name='labels_out')
 
-    Model(inputs=[images_in, lod_in], outputs=[scores_out]).summary()
+    Model(inputs=[images_in, lod_in], outputs=[scores_out])#.summary()
     
     return Model(inputs=[images_in, lod_in], outputs=[scores_out])
 
@@ -132,6 +136,7 @@ def Variational_encoder(resolution=256,num_channels=3,latent_dim=128,kernel_size
     #dshape=( num_channels, int(resolution/2), int(resolution/2*3))
     dshape=( num_channels, int(resolution/2), int(resolution/2))
     images_in = Input(shape=dshape)
+    dtype               = 'float32'
 
     resolution_log2 = int(np.log2(resolution))
 
@@ -151,6 +156,7 @@ def Variational_encoder(resolution=256,num_channels=3,latent_dim=128,kernel_size
         x = BatchNormalization(axis=1,name=name)(x)
         x = LeakyReLU(0.2)(x)
     flat = Flatten()(x)
+    flat = Activation('linear', dtype=dtype)(flat)
     # No activation
     #one for mean and another for logvar
     #mean = Dense(latent_dim)(x)
@@ -160,15 +166,16 @@ def Variational_encoder(resolution=256,num_channels=3,latent_dim=128,kernel_size
     #logvar = tf.identity(logvar, name='encoded_logvar')
 
     if variational:
-        Model(inputs=[images_in], outputs=[flat]).summary()
+        Model(inputs=[images_in], outputs=[flat])#.summary()
     
         return Model(inputs=[images_in], outputs=[flat])
 
     else:
         name = 'Dense_latent'
         latent = Dense(latent_dim, name=name)(flat)
+        latent = Activation('linear', dtype=dtype)(latent)
         latent = tf.identity(latent, name='encoded_latent')
-        Model(inputs=[images_in], outputs=[latent]).summary()
+        Model(inputs=[images_in], outputs=[latent])#.summary()
         
         return Model(inputs=[images_in], outputs=[latent])
 
@@ -183,6 +190,7 @@ def Variational_encoder(resolution=256,num_channels=3,latent_dim=128,kernel_size
 def Variational_decoder(resolution=256,num_channels=3,latent_dim=128,kernel_size=3,base_filter=32,variational=False):
     latent_in = Input(shape=(latent_dim))
     resolution_log2 = int(np.log2(resolution))
+    dtype               = 'float32'
 
     base_units = base_filter*2**(resolution_log2-3-1)
 
@@ -214,9 +222,10 @@ def Variational_decoder(resolution=256,num_channels=3,latent_dim=128,kernel_size
     #x = Conv2DTranspose(filters=3, kernel_size=1, strides=1,data_format='channels_first',activation='sigmoid')(x)
     x = Conv2D(filters=num_channels, kernel_size=3, strides=1,data_format='channels_first',padding='same')(x)
 
-    decoded_image = tf.identity(x, name='decoded_image')
+    decoded_image = Activation('linear', dtype=dtype)(x)
+    decoded_image = tf.identity(decoded_image, name='decoded_image')
 
-    Model(inputs=[latent_in], outputs=[decoded_image]).summary()
+    Model(inputs=[latent_in], outputs=[decoded_image])#.summary()
     
     return Model(inputs=[latent_in], outputs=[decoded_image])
 

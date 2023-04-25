@@ -12,10 +12,10 @@ import os
 #import config
 #import tfutil
 #import dataset
-import myCProGan.networks2 as networks2
-import myCProGan.loss as loss
-from myCProGan.snapshots import *
-from myCProGan.dataset import *
+import networks2 as networks2
+import loss as loss
+from snapshots import *
+from dataset import *
 #import misc
 
 from tensorflow.keras.optimizers import Adam
@@ -185,7 +185,7 @@ def TrainingSchedule(
 # @click.option('--D_repeats', type=int, default=2)
 # @click.option('--batch_size', type=int, default=8)
 # @click.option('--load', default=False)
-def train_cycle(multi_node=False,index=0,use_gs=False,datapath='',outpath='',init_res=32,max_res=256,change_model=False,lod_training_kimg=300,lod_transition_kimg=1500,minibatch_base=32,total_kimg=12000,minibatch_repeats=4,D_repeats=2,batch_size=8,load=False,use_gpus=True):
+def train_cycle(multi_node=False,index=0,use_gs=False,datapath='',outpath='',init_res=32,max_res=256,change_model=False,lod_training_kimg=300,lod_transition_kimg=1500,minibatch_base=32,total_kimg=12000,minibatch_repeats=4,D_repeats=2,batch_size=8,load=False,use_gpus=True,profiling=False, use_tf32=True, use_precision=None):
     #initialization of variables
     BETA_1 = 0.0
     BETA_2 = 0.99
@@ -198,7 +198,7 @@ def train_cycle(multi_node=False,index=0,use_gs=False,datapath='',outpath='',ini
     curr_res_log2 = int(np.log2(init_res))
     prev_res = -1
 
-    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: dict_batch_size*8, 64: dict_batch_size*4, 128: dict_batch_size*2}
+    minibatch_dict = {4: 1024, 8: 512, 16: 256, 32: dict_batch_size*8, 64: dict_batch_size*4, 128: dict_batch_size*2, 256: dict_batch_size}
     max_minibatch_per_gpu = {256: dict_batch_size, 512: 8, 1024: 8}
     G_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
     D_lrate_dict = {256: 0.0015, 512: 0.002, 1024: 0.003}
@@ -209,8 +209,8 @@ def train_cycle(multi_node=False,index=0,use_gs=False,datapath='',outpath='',ini
 
     #initialization of paths
     #tfrecord_dir = '/home/renato/dataset'
-    tfrecord_dir_train = datapath + '/train-floods' #'/home/renato/dataset/satimages'
-    tfrecord_dir_test = datapath + '/test-floods' #'/home/renato/dataset/satimages'
+    tfrecord_dir_train = datapath + 'floods/' #+ '/train-floods' #'/home/renato/dataset/satimages'
+    tfrecord_dir_test = datapath + 'floods/' #+ '/test-floods' #'/home/renato/dataset/satimages'
     
     print(tfrecord_dir_train)
     print(tfrecord_dir_test)
@@ -222,11 +222,18 @@ def train_cycle(multi_node=False,index=0,use_gs=False,datapath='',outpath='',ini
     net_size = init_res
     
     #create logs for tensorboard
-    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    train_log_dir = '/home/jovyan/runs/train' #'logs/gradient_tape/' + current_time + '/train'
-    test_log_dir = '/home/jovyan/runs/test' #'logs/gradient_tape/' + current_time + '/test'
-    train_summary_writer = tf.summary.create_file_writer(train_log_dir)
-    test_summary_writer = tf.summary.create_file_writer(test_log_dir)
+#     current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+#     train_log_dir = '/home/jovyan/runs/train' #'logs/gradient_tape/' + current_time + '/train'
+#     test_log_dir = '/home/jovyan/runs/test' #'logs/gradient_tape/' + current_time + '/test'
+#     train_summary_writer = tf.summary.create_file_writer(train_log_dir)
+#     test_summary_writer = tf.summary.create_file_writer(test_log_dir)
+
+    if profiling:
+        tf.config.experimental.enable_tensor_float_32_execution(use_tf32)
+        if use_precision != None:
+            tf.keras.mixed_precision.set_global_policy(use_precision)
+        print(tf.config.experimental.tensor_float_32_execution_enabled())
+        print(batch_size)
 
 
     #start strategy
@@ -482,6 +489,9 @@ def train_cycle(multi_node=False,index=0,use_gs=False,datapath='',outpath='',ini
         optimizer.set_weights(weight_values)
 
         return True
+    
+    nbatch = 0
+    time_average = 0
 
     while curr_image < total_kimg * 1000:
         # update model / variables (lr, lod, dataset) if needed 
@@ -663,6 +673,8 @@ def train_cycle(multi_node=False,index=0,use_gs=False,datapath='',outpath='',ini
             prev_res = resolution
 
             print('Finished changing resolution', flush=True)
+            
+        file_time = time.time()
 
         # Run training ops.
         for repeat in range(minibatch_repeats):
@@ -677,7 +689,39 @@ def train_cycle(multi_node=False,index=0,use_gs=False,datapath='',outpath='',ini
                 gen_loss, disc_loss, global_loss, local_loss, gen_test_loss, disc_test_loss, global_test_loss, local_test_loss = training_step_tf_fuction_256(dataset_iter_train, dataset_iter_test, lod_in_value)
             #print(lossval.numpy())
 
-        #Run Test
+        #Run Profilling
+        
+        
+        if profiling:
+            #print(tf.config.experimental.tensor_float_32_execution_enabled())
+            #print( "Time taken by batch training was",str(time.time() - file_time),"seconds.")
+            if nbatch > 0:
+                time_average += (time.time() - file_time)
+            #tf.profiler.experimental.stop()
+            if resolution == 32:
+                graph = training_step_tf_fuction_32.get_concrete_function(dataset_iter_train, dataset_iter_test, lod_in_value).graph #_list_all_concrete_functions()
+            elif resolution == 64:
+                graph = training_step_tf_fuction_64.get_concrete_function(dataset_iter_train, dataset_iter_test, lod_in_value).graph #_list_all_concrete_functions()
+            elif resolution == 128:
+                graph = training_step_tf_fuction_128.get_concrete_function(dataset_iter_train, dataset_iter_test, lod_in_value).graph #_list_all_concrete_functions()
+            elif resolution == 256:
+                graph = training_step_tf_fuction_256.get_concrete_function(dataset_iter_train, dataset_iter_test, lod_in_value).graph #_list_all_concrete_functions()
+            run_meta = tf.compat.v1.RunMetadata()
+            opts = (tf.compat.v1.profiler.ProfileOptionBuilder(tf.compat.v1.profiler.ProfileOptionBuilder.float_operation()).with_empty_output().build())
+            #opts = (tf.compat.v1.profiler.ProfileOptionBuilder(tf.compat.v1.profiler.ProfileOptionBuilder.float_operation()).with_max_depth(3).build())
+            #opts = tf.compat.v1.profiler.ProfileOptionBuilder.float_operation()
+            flops = tf.compat.v1.profiler.profile(graph=graph,run_meta=run_meta, cmd='op', options=opts)
+            #print(flops)
+            if nbatch == 0:
+                #print(flops)
+                print('FLOP = ', flops.total_float_ops)# / 2)
+            #return
+            
+            nbatch += 1
+            
+            if nbatch == 6:
+                print('Average per batch was: ', str(time_average / (nbatch - 1)))
+                break
 
 
         # get stats and save model
@@ -691,57 +735,57 @@ def train_cycle(multi_node=False,index=0,use_gs=False,datapath='',outpath='',ini
 #         global_loss_test.append(global_test_loss.numpy()) 
 #         local_loss_test.append(local_test_loss.numpy())
 
-        if curr_image % (global_batch_size * 100) == 0:
-            print(curr_image)
-            print(time.time() - train_time )
-            print(lod_in_value)
-            # get stats
-            train_time = time.time()
-            print ("-------------------------------------------------------------------------------------------------------------", flush=True)
-            print ("{:<20} | {:<20} | {:<20} | {:<20} | {:<20}".format(' ', 'Generator', 'Discriminator', 'Global', 'Local'))
-            print ("{:<20} | {:<20} | {:<20} | {:<20} | {:<20}".format('Train', gen_loss.numpy(), disc_loss.numpy(), global_loss.numpy(), local_loss.numpy()))
-            print ("{:<20} | {:<20} | {:<20} | {:<20} | {:<20}".format('Test', gen_test_loss.numpy(), disc_test_loss.numpy(), global_test_loss.numpy(), local_test_loss.numpy()))
-            print ("-------------------------------------------------------------------------------------------------------------",flush=True)
-#             
+#         if curr_image % (global_batch_size * 100) == 0:
+#             print(curr_image)
+#             print(time.time() - train_time )
+#             print(lod_in_value)
+#             # get stats
+#             train_time = time.time()
+#             print ("-------------------------------------------------------------------------------------------------------------", flush=True)
+#             print ("{:<20} | {:<20} | {:<20} | {:<20} | {:<20}".format(' ', 'Generator', 'Discriminator', 'Global', 'Local'))
+#             print ("{:<20} | {:<20} | {:<20} | {:<20} | {:<20}".format('Train', gen_loss.numpy(), disc_loss.numpy(), global_loss.numpy(), local_loss.numpy()))
+#             print ("{:<20} | {:<20} | {:<20} | {:<20} | {:<20}".format('Test', gen_test_loss.numpy(), disc_test_loss.numpy(), global_test_loss.numpy(), local_test_loss.numpy()))
+#             print ("-------------------------------------------------------------------------------------------------------------",flush=True)
+# #             
 
-        if curr_image % (global_batch_size * 100) == 0:
-            if change_model:
-                grid = construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=cvae, gen_model=gen, lod_in=lod_in_value,size=resolution)
-            else:
-                grid = construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=cvae, gen_model=gen, lod_in=lod_in_value,size=256)
-            save_grid_pgan(gw, gh,grid, step=curr_image,outpath=outpath)
+#         if curr_image % (global_batch_size * 100) == 0:
+#             if change_model:
+#                 grid = construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=cvae, gen_model=gen, lod_in=lod_in_value,size=resolution)
+#             else:
+#                 grid = construct_grid_to_save_pgan(gw, gh, reals, grid, cvae_model=cvae, gen_model=gen, lod_in=lod_in_value,size=256)
+#             save_grid_pgan(gw, gh,grid, step=curr_image,outpath=outpath)
 
-        if curr_image % (global_batch_size * 10000) == 0:
-            # save model
-            gen.save_weights(outpath+'saved_models/pgan/models/generator_'+str(int(curr_image/1000))+'.h5')
-            disc.save_weights(outpath+'saved_models/pgan/models/discriminator_'+str(int(curr_image/1000))+'.h5')
-#             pickle.dump({'gen_loss': gen_loss_train, 'disc_loss': disc_loss_train, 'global_loss': global_loss_train, 'local_loss': local_loss_train, 'gen_loss_test': gen_loss_test, 'disc_loss_test': disc_loss_test, 'global_loss_test': global_loss_test, 'local_loss_test': local_loss_test}, open(outpath+'losses.pkl', 'wb'))
-            # save optimizeer
-            np.save(outpath+'saved_models/pgan_optimizers/g_optimizer_'+str(int(curr_image/1000))+'.npy', G_optimizer.get_weights())
-            np.save(outpath+'saved_models/pgan_optimizers/d_optimizer_'+str(int(curr_image/1000))+'.npy', D_optimizer.get_weights())
-            print('Model Saved', flush=True)
+#         if curr_image % (global_batch_size * 10000) == 0:
+#             # save model
+#             gen.save_weights(outpath+'saved_models/pgan/models/generator_'+str(int(curr_image/1000))+'.h5')
+#             disc.save_weights(outpath+'saved_models/pgan/models/discriminator_'+str(int(curr_image/1000))+'.h5')
+# #             pickle.dump({'gen_loss': gen_loss_train, 'disc_loss': disc_loss_train, 'global_loss': global_loss_train, 'local_loss': local_loss_train, 'gen_loss_test': gen_loss_test, 'disc_loss_test': disc_loss_test, 'global_loss_test': global_loss_test, 'local_loss_test': local_loss_test}, open(outpath+'losses.pkl', 'wb'))
+#             # save optimizeer
+#             np.save(outpath+'saved_models/pgan_optimizers/g_optimizer_'+str(int(curr_image/1000))+'.npy', G_optimizer.get_weights())
+#             np.save(outpath+'saved_models/pgan_optimizers/d_optimizer_'+str(int(curr_image/1000))+'.npy', D_optimizer.get_weights())
+#             print('Model Saved', flush=True)
           
-        if curr_image % (global_batch_size * 100) == 0:
-            #write tensorboard logs
-            tensor_board_step = curr_image // (global_batch_size * 100)
-            with train_summary_writer.as_default():
-                tf.summary.scalar('loss', train_loss.result(), step=tensor_board_step)
-            with test_summary_writer.as_default():
-                tf.summary.scalar('loss', test_loss.result(), step=tensor_board_step)
+#         if curr_image % (global_batch_size * 100) == 0:
+#             #write tensorboard logs
+#             tensor_board_step = curr_image // (global_batch_size * 100)
+#             with train_summary_writer.as_default():
+#                 tf.summary.scalar('loss', train_loss.result(), step=tensor_board_step)
+#             with test_summary_writer.as_default():
+#                 tf.summary.scalar('loss', test_loss.result(), step=tensor_board_step)
 
-            template = 'Image {}, Loss: {}, Test Loss: {}'
-            print(template.format(tensor_board_step, train_loss.result(), test_loss.result()))
+#             template = 'Image {}, Loss: {}, Test Loss: {}'
+#             print(template.format(tensor_board_step, train_loss.result(), test_loss.result()))
 
-            # Reset metrics every epoch
-            train_loss.reset_states()
-            test_loss.reset_states()
+#             # Reset metrics every epoch
+#             train_loss.reset_states()
+#             test_loss.reset_states()
       
 
 
-        curr_image += global_batch_size
+#         curr_image += global_batch_size
 
-    gen.save_weights(outpath+'generator_Final.h5')
-    disc.save_weights(outpath+'discriminator_Final.h5')
+#     gen.save_weights(outpath+'generator_Final.h5')
+#     disc.save_weights(outpath+'discriminator_Final.h5')
     return
 
 

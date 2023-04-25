@@ -10,9 +10,9 @@ import math
 #import config
 #import tfutil
 #import dataset
-import myCProGan.networks2 as networks2
-import myCProGan.loss as loss
-from myCProGan.dataset import *
+import networks2 as networks2
+import loss as loss
+from dataset import *
 #from myCProGan.train import *
 #import misc
 import matplotlib.pyplot as plt

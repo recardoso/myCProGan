@@ -7,7 +7,7 @@
 
 import numpy as np
 import tensorflow as tf
-import myCProGan.networks2 as networks2
+import networks2 as networks2
 import math
 #import config
 

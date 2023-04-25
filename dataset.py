@@ -10,8 +10,8 @@ import math
 #import config
 #import tfutil
 #import dataset
-import myCProGan.networks2 as networks2
-import myCProGan.loss as loss
+import networks2 as networks2
+import loss as loss
 #from myCProGan.train import *
 #import misc
 import matplotlib.pyplot as plt
@@ -146,6 +146,8 @@ def get_dataset(tfr_files,      # Directory containing a collection of tfrecords
     #batch_size      = 120       # should be a batch size per each lod??
     
     # I'm not doing anything with the labels I might need to change that
+    
+    print(tfr_files)
 
     tfr_shapes, tfr_lods = determine_shape(tfr_files, resolution = resolution)
     _tf_datasets=dict()
